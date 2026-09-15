@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -215,6 +216,43 @@ class UserRepository:
             user.is_active = not user.is_active
             await self._session.flush()
         return user
+
+    async def update_role(
+        self,
+        user_id: int,
+        role: UserRole,
+    ) -> User | None:
+        """Обновляет системную роль сотрудника.
+
+        Args:
+            user_id: Первичный идентификатор пользователя в базе данных.
+            role: Новая системная роль сотрудника.
+
+        Returns:
+            Обновленный объект пользователя или None, если он не найден.
+        """
+        user = await self.get_by_id(user_id)
+        if user is not None:
+            user.role = role
+            await self._session.flush()
+        return user
+
+    async def delete_user(self, user_id: int) -> bool:
+        """Удаляет сотрудника из базы данных.
+
+        Args:
+            user_id: Первичный идентификатор пользователя в базе данных.
+
+        Returns:
+            True, если сотрудник был удален, иначе False.
+        """
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return False
+        stmt = delete(User).where(User.id == user_id)
+        await self._session.execute(stmt)
+        await self._session.flush()
+        return True
 
     async def ensure_whitelist_users(
         self,

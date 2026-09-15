@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import datetime
 import zoneinfo
 
-from sqlalchemy import update
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -20,8 +20,10 @@ from app.config import PostCode
 from app.config import TIMEZONE_NAME
 from app.config import UserRole
 from app.core.permissions import can_manage_appointment
+from app.core.permissions import can_manage_users
 from app.database.models import Appointment
 from app.database.models import HistoryActionType
+from app.database.models import HistoryLog
 from app.database.models import Post
 from app.database.models import User
 from app.database.repositories import AppointmentRepository
@@ -950,11 +952,84 @@ class BookingService:
             )
             return updated
 
+    async def change_user_role(
+        self,
+        target_user_id: int,
+        new_role: UserRole,
+        owner_telegram_id: int,
+    ) -> User:
+        """Изменяет системную роль сотрудника владельцем сервиса.
+
+        Args:
+            target_user_id: ID целевого сотрудника в базе данных.
+            new_role: Новая системная роль.
+            owner_telegram_id: Telegram ID владельца сервиса.
+
+        Returns:
+            Обновленный объект пользователя.
+
+        Raises:
+            PermissionDeniedError: Если инициатор не владелец.
+            EntityNotFoundError: Если сотрудник не найден.
+        """
+        async with get_async_session(self._session_factory) as session:
+            user_repo = UserRepository(session)
+            owner = await user_repo.get_by_telegram_id(owner_telegram_id)
+            if owner is None or not can_manage_users(owner):
+                raise PermissionDeniedError(
+                    'Только владелец сервиса может изменять роли сотрудников.',
+                )
+
+            updated = await user_repo.update_role(
+                user_id=target_user_id,
+                role=new_role,
+            )
+            if updated is None:
+                raise EntityNotFoundError('Сотрудник не найден.')
+            return updated
+
+    async def delete_user_by_owner(
+        self,
+        target_user_id: int,
+        owner_telegram_id: int,
+    ) -> bool:
+        """Удаляет сотрудника из системы владельцем сервиса.
+
+        Args:
+            target_user_id: ID целевого сотрудника в базе данных.
+            owner_telegram_id: Telegram ID владельца сервиса.
+
+        Returns:
+            True при успешном удалении.
+
+        Raises:
+            PermissionDeniedError: Если инициатор не владелец или удаляет себя.
+            EntityNotFoundError: Если сотрудник не найден.
+        """
+        async with get_async_session(self._session_factory) as session:
+            user_repo = UserRepository(session)
+            owner = await user_repo.get_by_telegram_id(owner_telegram_id)
+            if owner is None or not can_manage_users(owner):
+                raise PermissionDeniedError(
+                    'Только владелец сервиса может удалять сотрудников.',
+                )
+
+            target = await user_repo.get_by_id(target_user_id)
+            if target is None:
+                raise EntityNotFoundError('Сотрудник не найден.')
+
+            if target.telegram_id == owner_telegram_id:
+                raise PermissionDeniedError(
+                    'Владелец не может удалить собственный аккаунт.',
+                )
+
+            return await user_repo.delete_user(target_user_id)
+
     async def clear_all_calendars_and_appointments(
         self,
         user_telegram_id: int,
     ) -> dict[str, int]:
-        """Очищает события во всех Google Календарях и отменяет наряды в базе.
+        """Очищает события во всех Google Календарях и сбрасывает базу нарядов.
 
         Args:
             user_telegram_id: Telegram ID владельца, запросившего очистку.
@@ -972,7 +1047,7 @@ class BookingService:
                 user = await user_repo.get_by_telegram_id(user_telegram_id)
                 if user is None or user.role != UserRole.OWNER:
                     raise PermissionDeniedError(
-                        'Очистка календарей разрешена только владельцу сервиса.',
+                        'Очистка разрешена только владельцу сервиса.',
                     )
 
                 if self._calendar_service is None:
@@ -982,20 +1057,7 @@ class BookingService:
 
                 stats = await self._calendar_service.clear_all_events()
 
-                stmt = (
-                    update(Appointment)
-                    .where(
-                        Appointment.status.in_([
-                            AppointmentStatus.CONFIRMED,
-                            AppointmentStatus.IN_PROGRESS,
-                            AppointmentStatus.WAITING_TRANSFER,
-                        ])
-                    )
-                    .values(
-                        status=AppointmentStatus.CANCELLED,
-                        google_calendar_event_id=None,
-                        master_comment='Массовая очистка календарей владельцем',
-                    )
-                )
-                await session.execute(stmt)
+                await session.execute(delete(HistoryLog))
+                await session.execute(delete(Appointment))
+
                 return stats

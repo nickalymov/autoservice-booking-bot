@@ -19,9 +19,13 @@ from app.bot.handlers.schedule import _calculate_free_windows
 from app.bot.handlers.schedule import _format_day_schedule
 from app.bot.handlers.schedule import format_my_appointments_view
 from app.bot.handlers.schedule import format_shop_appointments_view
-from app.bot.keyboards.inline import StaffToggleAction
+from app.bot.keyboards.inline import StaffAction
+from app.bot.keyboards.inline import StaffRoleAction
+from app.bot.keyboards.inline import get_delete_confirm_kb
 from app.bot.keyboards.inline import get_load_summary_kb
-from app.bot.keyboards.inline import get_staff_management_kb
+from app.bot.keyboards.inline import get_role_selector_kb
+from app.bot.keyboards.inline import get_staff_list_kb
+from app.bot.keyboards.inline import get_user_card_kb
 from app.bot.keyboards.reply import BTN_ALL_BOOKINGS
 from app.bot.keyboards.reply import BTN_FREE_SLOTS
 from app.bot.keyboards.reply import BTN_MY_BOOKINGS
@@ -35,6 +39,7 @@ from app.config import TIMEZONE_NAME
 from app.config import UserRole
 from app.core.booking_service import BookingError
 from app.core.booking_service import BookingService
+from app.core.booking_service import PermissionDeniedError
 from app.database.models import User
 from app.database.repositories import AppointmentRepository
 from app.database.repositories import UserRepository
@@ -172,7 +177,7 @@ async def _render_staff_management_panel(
     current_user: User,
     session: AsyncSession,
 ) -> None:
-    """Выводит панель управления персоналом с кнопками переключения.
+    """Выводит интерактивный список сотрудников сервиса для владельца.
 
     Args:
         message: Сообщение Telegram.
@@ -186,34 +191,14 @@ async def _render_staff_management_panel(
     user_repo = UserRepository(session)
     users = await user_repo.get_all_users()
 
-    lines = [
-        '<b>Управление сотрудниками автосервиса:</b>\n',
-        'Нажмите на имя сотрудника ниже для переключения доступа:\n',
-    ]
-    for user in users:
-        role_label = (
-            'Владелец'
-            if user.role == UserRole.OWNER
-            else 'Продавец'
-            if user.role == UserRole.SALES
-            else 'Мастер'
-        )
-        status_label = 'Активен' if user.is_active else 'Отключен'
-        rem_label = '🔔' if user.reminders_enabled else '🔕'
-        lines.append(
-            f'• <b>{user.full_name}</b> ({role_label}) — '
-            f'{status_label} {rem_label}\n'
-            f'  ID: <code>{user.telegram_id}</code>',
-        )
-
-    lines.append(
-        '\nДля добавления нового сотрудника используйте:\n'
-        '<code>/add_user &lt;id&gt; &lt;Имя&gt; &lt;MECHANIC|SALES|OWNER&gt;</code>',
+    header_text = (
+        '<b>Управление командой автосервиса</b>\n\n'
+        'Выберите сотрудника из списка ниже для просмотра профиля, '
+        'изменения роли, блокировки или удаления:'
     )
-
     await message.answer(
-        text='\n'.join(lines),
-        reply_markup=get_staff_management_kb(users),
+        text=header_text,
+        reply_markup=get_staff_list_kb(users),
     )
 
 
@@ -257,26 +242,77 @@ async def handle_staff_management_button(
     )
 
 
-@router.callback_query(StaffToggleAction.filter())
-async def handle_staff_toggle_callback(
+@router.callback_query(StaffAction.filter(F.action == 'view'))
+async def handle_staff_view_profile(
     callback: CallbackQuery,
-    callback_data: StaffToggleAction,
+    callback_data: StaffAction,
     current_user: User,
     session: AsyncSession,
 ) -> None:
-    """Переключает статус доступа сотрудника по инлайн-кнопке.
+    """Отображает карточку управления выбранным сотрудником.
 
     Args:
         callback: Запрос обратного вызова.
-        callback_data: Идентификатор целевого сотрудника.
+        callback_data: Данные действия.
         current_user: Авторизованный владелец.
         session: Асинхронная сессия базы данных.
     """
     if current_user.role != UserRole.OWNER:
-        await callback.answer(
-            'Только владелец может менять доступ сотрудников.',
-            show_alert=True,
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    user_repo = UserRepository(session)
+    target_user = await user_repo.get_by_id(callback_data.user_id)
+    if target_user is None:
+        await callback.answer('Сотрудник не найден.', show_alert=True)
+        return
+
+    is_self = target_user.telegram_id == current_user.telegram_id
+    status_label = '🟢 Активен' if target_user.is_active else '🔴 Заблокирован'
+    role_label = (
+        'Мастер (MECHANIC)'
+        if target_user.role == UserRole.MECHANIC
+        else 'Продавец (SALES)'
+        if target_user.role == UserRole.SALES
+        else 'Владелец (OWNER)'
+    )
+    rem_label = 'Включены' if target_user.reminders_enabled else 'Отключены'
+
+    card_text = (
+        f'<b>Профиль сотрудника:</b> {target_user.full_name}\n\n'
+        f'• <b>Роль:</b> {role_label}\n'
+        f'• <b>Статус:</b> {status_label}\n'
+        f'• <b>Напоминания (30 мин):</b> {rem_label}\n'
+        f'• <b>Telegram ID:</b> <code>{target_user.telegram_id}</code>\n'
+    )
+    if is_self:
+        card_text += '\n<i>(Это ваш собственный аккаунт)</i>'
+
+    if callback.message:
+        await callback.message.edit_text(
+            text=card_text,
+            reply_markup=get_user_card_kb(target_user, is_self=is_self),
         )
+    await callback.answer()
+
+
+@router.callback_query(StaffAction.filter(F.action == 'toggle'))
+async def handle_staff_toggle_access(
+    callback: CallbackQuery,
+    callback_data: StaffAction,
+    current_user: User,
+    session: AsyncSession,
+) -> None:
+    """Блокирует или восстанавливает доступ сотрудника.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Данные действия.
+        current_user: Авторизованный владелец.
+        session: Асинхронная сессия базы данных.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
         return
 
     user_repo = UserRepository(session)
@@ -295,25 +331,235 @@ async def handle_staff_toggle_callback(
     target_user.is_active = not target_user.is_active
     await session.commit()
 
-    users = await user_repo.get_all_users()
+    word = 'активирован' if target_user.is_active else 'заблокирован'
+    await callback.answer(f'Доступ сотрудника {word}.')
+
+    is_self = target_user.telegram_id == current_user.telegram_id
+    status_label = '🟢 Активен' if target_user.is_active else '🔴 Заблокирован'
+    role_label = (
+        'Мастер (MECHANIC)'
+        if target_user.role == UserRole.MECHANIC
+        else 'Продавец (SALES)'
+        if target_user.role == UserRole.SALES
+        else 'Владелец (OWNER)'
+    )
+    rem_label = 'Включены' if target_user.reminders_enabled else 'Отключены'
+
+    card_text = (
+        f'<b>Профиль сотрудника:</b> {target_user.full_name}\n\n'
+        f'• <b>Роль:</b> {role_label}\n'
+        f'• <b>Статус:</b> {status_label}\n'
+        f'• <b>Напоминания (30 мин):</b> {rem_label}\n'
+        f'• <b>Telegram ID:</b> <code>{target_user.telegram_id}</code>\n'
+    )
     if callback.message:
-        await callback.message.edit_reply_markup(
-            reply_markup=get_staff_management_kb(users),
+        await callback.message.edit_text(
+            text=card_text,
+            reply_markup=get_user_card_kb(target_user, is_self=is_self),
         )
 
-    state_word = 'активирован' if target_user.is_active else 'заблокирован'
-    await callback.answer(
-        f'Доступ сотрудника {target_user.full_name} {state_word}.',
-    )
+
+@router.callback_query(StaffAction.filter(F.action == 'role_menu'))
+async def handle_staff_role_menu(
+    callback: CallbackQuery,
+    callback_data: StaffAction,
+    current_user: User,
+) -> None:
+    """Открывает меню назначения новой роли сотруднику.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Данные действия.
+        current_user: Авторизованный владелец.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(
+            text='Выберите новую системную роль для сотрудника:',
+            reply_markup=get_role_selector_kb(callback_data.user_id),
+        )
+    await callback.answer()
 
 
-@router.message(Command(commands=['clear_calendars', 'purge_calendars']))
+@router.callback_query(StaffRoleAction.filter())
+async def handle_staff_set_role(
+    callback: CallbackQuery,
+    callback_data: StaffRoleAction,
+    current_user: User,
+    booking_service: BookingService,
+    session: AsyncSession,
+) -> None:
+    """Применяет выбранную системную роль сотруднику.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Данные выбранной роли.
+        current_user: Авторизованный владелец.
+        booking_service: Сервис бизнес-логики.
+        session: Асинхронная сессия базы данных.
+    """
+    try:
+        new_role = UserRole(callback_data.role)
+        updated = await booking_service.change_user_role(
+            target_user_id=callback_data.user_id,
+            new_role=new_role,
+            owner_telegram_id=current_user.telegram_id,
+        )
+        await callback.answer(
+            f'Роль сотрудника {updated.full_name} изменена на {new_role.value}.',
+        )
+
+        user_repo = UserRepository(session)
+        target_user = await user_repo.get_by_id(callback_data.user_id)
+        if target_user and callback.message:
+            is_self = target_user.telegram_id == current_user.telegram_id
+            status_label = (
+                '🟢 Активен' if target_user.is_active else '🔴 Заблокирован'
+            )
+            role_label = (
+                'Мастер (MECHANIC)'
+                if target_user.role == UserRole.MECHANIC
+                else 'Продавец (SALES)'
+                if target_user.role == UserRole.SALES
+                else 'Владелец (OWNER)'
+            )
+            rem_label = (
+                'Включены' if target_user.reminders_enabled else 'Отключены'
+            )
+
+            card_text = (
+                f'<b>Профиль сотрудника:</b> {target_user.full_name}\n\n'
+                f'• <b>Роль:</b> {role_label}\n'
+                f'• <b>Статус:</b> {status_label}\n'
+                f'• <b>Напоминания (30 мин):</b> {rem_label}\n'
+                f'• <b>Telegram ID:</b> <code>{target_user.telegram_id}</code>\n'
+            )
+            await callback.message.edit_text(
+                text=card_text,
+                reply_markup=get_user_card_kb(target_user, is_self=is_self),
+            )
+    except (PermissionDeniedError, ValueError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(StaffAction.filter(F.action == 'delete_ask'))
+async def handle_staff_delete_ask(
+    callback: CallbackQuery,
+    callback_data: StaffAction,
+    current_user: User,
+    session: AsyncSession,
+) -> None:
+    """Запрашивает подтверждение удаления сотрудника.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Данные действия.
+        current_user: Авторизованный владелец.
+        session: Асинхронная сессия базы данных.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    user_repo = UserRepository(session)
+    target_user = await user_repo.get_by_id(callback_data.user_id)
+    if target_user is None:
+        await callback.answer('Сотрудник не найден.', show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text(
+            text=(
+                f'Вы действительно хотите удалить сотрудника '
+                f'<b>{target_user.full_name}</b> из базы данных сервиса?'
+            ),
+            reply_markup=get_delete_confirm_kb(target_user.id),
+        )
+    await callback.answer()
+
+
+@router.callback_query(StaffAction.filter(F.action == 'delete_confirm'))
+async def handle_staff_delete_confirm(
+    callback: CallbackQuery,
+    callback_data: StaffAction,
+    current_user: User,
+    booking_service: BookingService,
+    session: AsyncSession,
+) -> None:
+    """Выполняет удаление сотрудника из базы данных.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Данные действия.
+        current_user: Авторизованный владелец.
+        booking_service: Сервис управления бронированием.
+        session: Асинхронная сессия базы данных.
+    """
+    try:
+        await booking_service.delete_user_by_owner(
+            target_user_id=callback_data.user_id,
+            owner_telegram_id=current_user.telegram_id,
+        )
+        await callback.answer('Сотрудник успешно удален из системы.')
+
+        user_repo = UserRepository(session)
+        users = await user_repo.get_all_users()
+        if callback.message:
+            header_text = (
+                '<b>Управление командой автосервиса</b>\n\n'
+                'Выберите сотрудника из списка ниже для просмотра профиля, '
+                'изменения роли, блокировки или удаления:'
+            )
+            await callback.message.edit_text(
+                text=header_text,
+                reply_markup=get_staff_list_kb(users),
+            )
+    except PermissionDeniedError as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(StaffAction.filter(F.action == 'back_list'))
+async def handle_staff_back_list(
+    callback: CallbackQuery,
+    current_user: User,
+    session: AsyncSession,
+) -> None:
+    """Возвращает владельца к списку сотрудников.
+
+    Args:
+        callback: Запрос обратного вызова.
+        current_user: Авторизованный владелец.
+        session: Асинхронная сессия базы данных.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    user_repo = UserRepository(session)
+    users = await user_repo.get_all_users()
+    if callback.message:
+        header_text = (
+            '<b>Управление командой автосервиса</b>\n\n'
+            'Выберите сотрудника из списка ниже для просмотра профиля, '
+            'изменения роли, блокировки или удаления:'
+        )
+        await callback.message.edit_text(
+            text=header_text,
+            reply_markup=get_staff_list_kb(users),
+        )
+    await callback.answer()
+
+
+@router.message(Command(commands=['clear_calendars', 'purge_calendars', 'reset_all']))
 async def cmd_clear_calendars(
     message: Message,
     current_user: User,
     booking_service: BookingService,
 ) -> None:
-    """Очищает события во всех Google Календарях сервиса (для владельца).
+    """Очищает события в Google Календарях и удаляет наряды из базы данных.
 
     Args:
         message: Сообщение Telegram.
@@ -324,18 +570,18 @@ async def cmd_clear_calendars(
         await message.answer('Команда доступна только владельцу автосервиса.')
         return
 
-    await message.answer('Начинаю полную очистку Google Календарей...')
+    await message.answer('Начинаю полную очистку Google Календарей и базы нарядов...')
     try:
         stats = await booking_service.clear_all_calendars_and_appointments(
             user_telegram_id=current_user.telegram_id,
         )
-        report_lines = ['<b>Очистка календарей завершена успешно:</b>\n']
+        report_lines = ['<b>Очистка завершена успешно:</b>\n']
         for cal_name, count in stats.items():
             report_lines.append(f'• {cal_name}: удалено {count} событий')
-        report_lines.append('\nСвязанные наряды в базе данных сброшены.')
+        report_lines.append('\nВсе тестовые наряды и история изменений удалены из базы данных.')
         await message.answer(text='\n'.join(report_lines))
     except BookingError as exc:
-        await message.answer(f'Ошибка при очистке календарей: <code>{exc}</code>')
+        await message.answer(f'Ошибка при очистке: <code>{exc}</code>')
 
 
 @router.message(Command(commands=['add_user']))

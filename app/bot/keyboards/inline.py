@@ -12,6 +12,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton
 from aiogram.types import InlineKeyboardMarkup
 
+from app.config import UserRole
 from app.database.models.appointment import Appointment
 from app.database.models.post import Post
 from app.database.models.user import User
@@ -73,10 +74,18 @@ class MenuAction(CallbackData, prefix='menu'):
     action: str
 
 
-class StaffToggleAction(CallbackData, prefix='stftog'):
-    """Фабрика данных для переключения активности сотрудника."""
+class StaffAction(CallbackData, prefix='stf'):
+    """Фабрика действий администратора над сотрудником."""
+
+    action: str
+    user_id: int
+
+
+class StaffRoleAction(CallbackData, prefix='stfrol'):
+    """Фабрика назначения роли сотруднику."""
 
     user_id: int
+    role: str
 
 
 def get_confirmation_kb(public_id: str) -> InlineKeyboardMarkup:
@@ -436,25 +445,170 @@ def get_load_summary_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def get_staff_management_kb(
+def get_staff_list_kb(
     users: Sequence[User],
 ) -> InlineKeyboardMarkup:
-    """Создает интерактивную панель управления доступом сотрудников.
+    """Создает клавиатуру списка сотрудников для выбора профиля.
 
     Args:
-        users: Список зарегистрированных сотрудников.
+        users: Список всех пользователей системы.
 
     Returns:
-        Инлайн-клавиатура переключения доступа сотрудников.
+        Инлайн-клавиатура со списком сотрудников.
     """
     keyboard: list[list[InlineKeyboardButton]] = []
     for user in users:
-        status_icon = '🟢' if user.is_active else '🔴'
-        btn_label = f'{status_icon} {user.full_name} ({user.role.value})'
+        icon = '🟢' if user.is_active else '🔴'
+        role_label = (
+            'Мастер'
+            if user.role == UserRole.MECHANIC
+            else 'Продавец'
+            if user.role == UserRole.SALES
+            else 'Владелец'
+        )
+        btn_text = f'{icon} {user.full_name} ({role_label})'
         keyboard.append([
             InlineKeyboardButton(
-                text=btn_label,
-                callback_data=StaffToggleAction(user_id=user.id).pack(),
+                text=btn_text,
+                callback_data=StaffAction(
+                    action='view',
+                    user_id=user.id,
+                ).pack(),
             ),
         ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_user_card_kb(
+    user: User,
+    is_self: bool = False,
+) -> InlineKeyboardMarkup:
+    """Создает клавиатуру действий в профиле сотрудника.
+
+    Args:
+        user: Целевой пользователь.
+        is_self: Флаг собственного профиля владельца.
+
+    Returns:
+        Инлайн-клавиатура управления сотрудником.
+    """
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    toggle_text = '🔴 Заблокировать' if user.is_active else '🟢 Разблокировать'
+    if not is_self:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=toggle_text,
+                callback_data=StaffAction(
+                    action='toggle',
+                    user_id=user.id,
+                ).pack(),
+            ),
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                text='🔄 Изменить роль',
+                callback_data=StaffAction(
+                    action='role_menu',
+                    user_id=user.id,
+                ).pack(),
+            ),
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                text='🗑 Удалить сотрудника',
+                callback_data=StaffAction(
+                    action='delete_ask',
+                    user_id=user.id,
+                ).pack(),
+            ),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text='« К списку сотрудников',
+            callback_data=StaffAction(
+                action='back_list',
+                user_id=user.id,
+            ).pack(),
+        ),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_role_selector_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Создает клавиатуру выбора новой роли сотрудника.
+
+    Args:
+        user_id: Идентификатор сотрудника в базе данных.
+
+    Returns:
+        Инлайн-клавиатура назначения роли.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='🔧 Мастер (MECHANIC)',
+                callback_data=StaffRoleAction(
+                    user_id=user_id,
+                    role=UserRole.MECHANIC.value,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='🏬 Продавец (SALES)',
+                callback_data=StaffRoleAction(
+                    user_id=user_id,
+                    role=UserRole.SALES.value,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='👑 Владелец (OWNER)',
+                callback_data=StaffRoleAction(
+                    user_id=user_id,
+                    role=UserRole.OWNER.value,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='« Назад',
+                callback_data=StaffAction(
+                    action='view',
+                    user_id=user_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_delete_confirm_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Создает клавиатуру подтверждения удаления сотрудника.
+
+    Args:
+        user_id: Идентификатор сотрудника в базе данных.
+
+    Returns:
+        Инлайн-клавиатура подтверждения удаления.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='⚠️ Да, удалить',
+                callback_data=StaffAction(
+                    action='delete_confirm',
+                    user_id=user_id,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text='Отмена',
+                callback_data=StaffAction(
+                    action='view',
+                    user_id=user_id,
+                ).pack(),
+            ),
+        ],
+    ])
