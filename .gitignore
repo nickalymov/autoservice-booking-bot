@@ -1,0 +1,54 @@
+# Переменные окружения и секреты
+.env
+.env.*
+!.env.example
+credentials.json
+*credentials*.json
+client_secret*.json
+*.pem
+*.key
+
+# Конфиденциальные рабочие файлы и дампы диалогов
+Переписка.txt
+repository_export.md
+export_repo.py
+amvera_docs.txt
+vsegpt_docs.md
+
+# Локальные базы данных и папки данных
+*.db
+*.sqlite
+*.sqlite3
+data/
+/data/
+
+# Python байткод и кэш
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Тесты и статический анализ
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Среда разработки (IDE)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Логи и временные файлы ОС
+*.log
+.DS_Store
+Thumbs.db
