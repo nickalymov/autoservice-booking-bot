@@ -187,7 +187,9 @@ class GoogleCalendarService:
                         'доступ в настройках календаря.'
                     )
                 else:
-                    results[name] = f'Ошибка HTTP {exc.resp.status}: {exc.reason}'
+                    results[name] = (
+                        f'Ошибка HTTP {exc.resp.status}: {exc.reason}'
+                    )
             except Exception as exc:
                 results[name] = f'Ошибка соединения: {exc}'
 
@@ -320,3 +322,61 @@ class GoogleCalendarService:
             raise CalendarServiceError(
                 f'Не удалось удалить событие из Google Календаря: {exc}',
             ) from exc
+
+    async def clear_all_events(self) -> dict[str, int]:
+        """Удаляет все существующие события из всех рабочих календарей сервиса.
+
+        Returns:
+            Словарь со статистикой удаленных событий по каждому календарю.
+
+        Raises:
+            CalendarServiceError: При критическом сбое обращения к Google API.
+        """
+        calendar_ids: list[tuple[str, str | None]] = [
+            ('P1', self._settings.google_calendar_p1_id),
+            ('P2', self._settings.google_calendar_p2_id),
+            ('P3', self._settings.google_calendar_p3_id),
+            ('P4', self._settings.google_calendar_p4_id),
+            ('Обзорный', self._settings.google_calendar_overview_id),
+        ]
+
+        deleted_counts: dict[str, int] = {}
+        loop = asyncio.get_running_loop()
+
+        def _purge_calendar(cal_id: str) -> int:
+            events_result = (
+                self._client.events()
+                .list(calendarId=cal_id, maxResults=250)
+                .execute()
+            )
+            items = events_result.get('items', [])
+            deleted_count = 0
+            for item in items:
+                event_id = item.get('id')
+                if event_id:
+                    try:
+                        self._client.events().delete(
+                            calendarId=cal_id,
+                            eventId=event_id,
+                        ).execute()
+                        deleted_count += 1
+                    except HttpError:
+                        pass
+            return deleted_count
+
+        for name, cid in calendar_ids:
+            if not cid:
+                deleted_counts[name] = 0
+                continue
+            try:
+                purged_count = await loop.run_in_executor(
+                    None,
+                    lambda target_cid=cid: _purge_calendar(target_cid),
+                )
+                deleted_counts[name] = purged_count
+            except Exception as exc:
+                raise CalendarServiceError(
+                    f'Ошибка при очистке календаря {name}: {exc}',
+                ) from exc
+
+        return deleted_counts

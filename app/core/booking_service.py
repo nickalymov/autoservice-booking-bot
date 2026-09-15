@@ -12,11 +12,13 @@ from dataclasses import dataclass
 import datetime
 import zoneinfo
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import PostCode
 from app.config import TIMEZONE_NAME
+from app.config import UserRole
 from app.core.permissions import can_manage_appointment
 from app.database.models import Appointment
 from app.database.models import HistoryActionType
@@ -947,3 +949,53 @@ class BookingService:
                 ),
             )
             return updated
+
+    async def clear_all_calendars_and_appointments(
+        self,
+        user_telegram_id: int,
+    ) -> dict[str, int]:
+        """Очищает события во всех Google Календарях и отменяет наряды в базе.
+
+        Args:
+            user_telegram_id: Telegram ID владельца, запросившего очистку.
+
+        Returns:
+            Статистика удаленных событий по каждому календарю.
+
+        Raises:
+            PermissionDeniedError: Если пользователь не является владельцем.
+            BookingError: При отсутствии подключения к Google Календарю.
+        """
+        async with self._booking_lock:
+            async with get_async_session(self._session_factory) as session:
+                user_repo = UserRepository(session)
+                user = await user_repo.get_by_telegram_id(user_telegram_id)
+                if user is None or user.role != UserRole.OWNER:
+                    raise PermissionDeniedError(
+                        'Очистка календарей разрешена только владельцу сервиса.',
+                    )
+
+                if self._calendar_service is None:
+                    raise BookingError(
+                        'Интеграция с Google Календарём не подключена.',
+                    )
+
+                stats = await self._calendar_service.clear_all_events()
+
+                stmt = (
+                    update(Appointment)
+                    .where(
+                        Appointment.status.in_([
+                            AppointmentStatus.CONFIRMED,
+                            AppointmentStatus.IN_PROGRESS,
+                            AppointmentStatus.WAITING_TRANSFER,
+                        ])
+                    )
+                    .values(
+                        status=AppointmentStatus.CANCELLED,
+                        google_calendar_event_id=None,
+                        master_comment='Массовая очистка календарей владельцем',
+                    )
+                )
+                await session.execute(stmt)
+                return stats

@@ -33,12 +33,36 @@ from app.bot.keyboards.reply import NEW_BOOKING_HINT_TEXT
 from app.bot.keyboards.reply import get_main_reply_kb
 from app.config import TIMEZONE_NAME
 from app.config import UserRole
+from app.core.booking_service import BookingError
 from app.core.booking_service import BookingService
 from app.database.models import User
 from app.database.repositories import AppointmentRepository
 from app.database.repositories import UserRepository
 
 router = Router()
+
+
+def _resolve_greeting_name(
+    message: Message,
+    current_user: User,
+) -> str:
+    """Определяет обращение по правилу: Имя Фамилия -> @username -> ID.
+
+    Args:
+        message: Входящее сообщение Telegram.
+        current_user: Авторизованный пользователь из базы данных.
+
+    Returns:
+        Строка с отображаемым именем для персонализированного приветствия.
+    """
+    if message.from_user:
+        parts = [message.from_user.first_name, message.from_user.last_name]
+        full_name = ' '.join(p for p in parts if p).strip()
+        if full_name:
+            return full_name
+        if message.from_user.username:
+            return f'@{message.from_user.username}'
+    return str(current_user.telegram_id)
 
 
 @router.message(CommandStart())
@@ -59,9 +83,13 @@ async def cmd_start(
         if current_user.role == UserRole.SALES
         else 'Мастер'
     )
+    greeting_name = _resolve_greeting_name(
+        message=message,
+        current_user=current_user,
+    )
     await message.answer(
         text=(
-            f'Привет, <b>{current_user.full_name}</b> ({role_label})!\n'
+            f'Привет, <b>{greeting_name}</b> ({role_label})!\n'
             'Бот автосервиса готов к работе.\n'
             'Вы можете надиктовать запись голосовым сообщением, '
             'перенести наряд или выбрать нужный пункт меню.'
@@ -160,7 +188,7 @@ async def _render_staff_management_panel(
 
     lines = [
         '<b>Управление сотрудниками автосервиса:</b>\n',
-        'Нажмите на имя сотрудника ниже, чтобы включить или отключить доступ:\n',
+        'Нажмите на имя сотрудника ниже для переключения доступа:\n',
     ]
     for user in users:
         role_label = (
@@ -277,6 +305,37 @@ async def handle_staff_toggle_callback(
     await callback.answer(
         f'Доступ сотрудника {target_user.full_name} {state_word}.',
     )
+
+
+@router.message(Command(commands=['clear_calendars', 'purge_calendars']))
+async def cmd_clear_calendars(
+    message: Message,
+    current_user: User,
+    booking_service: BookingService,
+) -> None:
+    """Очищает события во всех Google Календарях сервиса (для владельца).
+
+    Args:
+        message: Сообщение Telegram.
+        current_user: Авторизованный сотрудник.
+        booking_service: Сервис управления бронированием.
+    """
+    if current_user.role != UserRole.OWNER:
+        await message.answer('Команда доступна только владельцу автосервиса.')
+        return
+
+    await message.answer('Начинаю полную очистку Google Календарей...')
+    try:
+        stats = await booking_service.clear_all_calendars_and_appointments(
+            user_telegram_id=current_user.telegram_id,
+        )
+        report_lines = ['<b>Очистка календарей завершена успешно:</b>\n']
+        for cal_name, count in stats.items():
+            report_lines.append(f'• {cal_name}: удалено {count} событий')
+        report_lines.append('\nСвязанные наряды в базе данных сброшены.')
+        await message.answer(text='\n'.join(report_lines))
+    except BookingError as exc:
+        await message.answer(f'Ошибка при очистке календарей: <code>{exc}</code>')
 
 
 @router.message(Command(commands=['add_user']))

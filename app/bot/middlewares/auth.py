@@ -20,6 +20,24 @@ from app.config import get_settings
 from app.database.repositories import UserRepository
 
 
+def extract_telegram_user_title(user: TelegramUser) -> str:
+    """Формирует отображаемое имя по правилу: Имя Фамилия -> @username -> ID.
+
+    Args:
+        user: Экземпляр пользователя Telegram.
+
+    Returns:
+        Строка с именем и фамилией, никнеймом или идентификатором.
+    """
+    name_parts = [user.first_name, user.last_name]
+    full_name = ' '.join(part for part in name_parts if part).strip()
+    if full_name:
+        return full_name
+    if user.username:
+        return f'@{user.username}'
+    return str(user.id)
+
+
 class AuthMiddleware(BaseMiddleware):
     """Мидлварь для проверки авторизации и белого списка Telegram ID."""
 
@@ -33,7 +51,7 @@ class AuthMiddleware(BaseMiddleware):
 
         Args:
             handler: Следующий обработчик в цепочке выполнения.
-            event: Входящий объект Telegram (Update, Message, CallbackQuery).
+            event: Входящий объект Telegram.
             data: Словарь контекста события.
 
         Returns:
@@ -75,4 +93,7 @@ class AuthMiddleware(BaseMiddleware):
             return None
 
         data['current_user'] = db_user
+        data['telegram_user_title'] = extract_telegram_user_title(
+            telegram_user,
+        )
         return await handler(event, data)
