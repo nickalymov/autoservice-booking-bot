@@ -88,6 +88,12 @@ class StaffRoleAction(CallbackData, prefix='stfrol'):
     role: str
 
 
+class NewUserRoleAction(CallbackData, prefix='nwurol'):
+    """Фабрика назначения роли для вновь создаваемого сотрудника."""
+
+    role: str
+
+
 def get_confirmation_kb(public_id: str) -> InlineKeyboardMarkup:
     """Создает клавиатуру подтверждения записи.
 
@@ -454,7 +460,7 @@ def get_staff_list_kb(
         users: Список всех пользователей системы.
 
     Returns:
-        Инлайн-клавиатура со списком сотрудников.
+        Инлайн-клавиатура со списком сотрудников и кнопкой добавления.
     """
     keyboard: list[list[InlineKeyboardButton]] = []
     for user in users:
@@ -476,6 +482,15 @@ def get_staff_list_kb(
                 ).pack(),
             ),
         ])
+    keyboard.append([
+        InlineKeyboardButton(
+            text='➕ Добавить сотрудника',
+            callback_data=StaffAction(
+                action='add_start',
+                user_id=0,
+            ).pack(),
+        ),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -579,6 +594,40 @@ def get_role_selector_kb(user_id: int) -> InlineKeyboardMarkup:
                 callback_data=StaffAction(
                     action='view',
                     user_id=user_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_new_user_role_selector_kb() -> InlineKeyboardMarkup:
+    """Создает клавиатуру назначения роли для нового создаваемого сотрудника.
+
+    Returns:
+        Инлайн-клавиатура с выбором роли нового сотрудника.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='🔧 Мастер (MECHANIC)',
+                callback_data=NewUserRoleAction(
+                    role=UserRole.MECHANIC.value,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='🏬 Продавец (SALES)',
+                callback_data=NewUserRoleAction(
+                    role=UserRole.SALES.value,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='👑 Владелец (OWNER)',
+                callback_data=NewUserRoleAction(
+                    role=UserRole.OWNER.value,
                 ).pack(),
             ),
         ],

@@ -13,6 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import UserRole
+from app.database.models.appointment import Appointment
+from app.database.models.history_log import HistoryLog
 from app.database.models.user import User
 
 _DEFAULT_STAFF: tuple[dict[str, str | int | UserRole], ...] = (
@@ -238,7 +240,7 @@ class UserRepository:
         return user
 
     async def delete_user(self, user_id: int) -> bool:
-        """Удаляет сотрудника из базы данных.
+        """Удаляет сотрудника из базы данных со всеми связями.
 
         Args:
             user_id: Первичный идентификатор пользователя в базе данных.
@@ -249,8 +251,32 @@ class UserRepository:
         user = await self.get_by_id(user_id)
         if user is None:
             return False
-        stmt = delete(User).where(User.id == user_id)
-        await self._session.execute(stmt)
+
+        appts_stmt = select(Appointment.id).where(
+            (Appointment.master_id == user_id)
+            | (Appointment.created_by_user_id == user_id)
+            | (Appointment.target_master_id == user_id)
+        )
+        linked_appt_ids = (await self._session.scalars(appts_stmt)).all()
+
+        if linked_appt_ids:
+            await self._session.execute(
+                delete(HistoryLog).where(
+                    HistoryLog.appointment_id.in_(linked_appt_ids)
+                )
+            )
+            await self._session.execute(
+                delete(Appointment).where(
+                    Appointment.id.in_(linked_appt_ids)
+                )
+            )
+
+        await self._session.execute(
+            delete(HistoryLog).where(HistoryLog.user_id == user_id)
+        )
+        await self._session.execute(
+            delete(User).where(User.id == user_id)
+        )
         await self._session.flush()
         return True
 

@@ -16,7 +16,6 @@ from aiogram.types import Update
 from aiogram.types import User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.database.repositories import UserRepository
 
 
@@ -68,11 +67,7 @@ class AuthMiddleware(BaseMiddleware):
         if session is None:
             return await handler(event, data)
 
-        settings = get_settings()
         user_repo = UserRepository(session)
-        await user_repo.ensure_whitelist_users(
-            settings.whitelist_admin_ids,
-        )
         db_user = await user_repo.get_by_telegram_id(telegram_user.id)
 
         if db_user is None or not db_user.is_active:

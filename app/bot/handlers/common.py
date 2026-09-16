@@ -4,6 +4,8 @@
 быстрого доступа, управление напоминаниями и администрирование пользователей.
 """
 
+from __future__ import annotations
+
 import datetime
 import zoneinfo
 
@@ -11,6 +13,7 @@ from aiogram import F
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,10 +22,12 @@ from app.bot.handlers.schedule import _calculate_free_windows
 from app.bot.handlers.schedule import _format_day_schedule
 from app.bot.handlers.schedule import format_my_appointments_view
 from app.bot.handlers.schedule import format_shop_appointments_view
+from app.bot.keyboards.inline import NewUserRoleAction
 from app.bot.keyboards.inline import StaffAction
 from app.bot.keyboards.inline import StaffRoleAction
 from app.bot.keyboards.inline import get_delete_confirm_kb
 from app.bot.keyboards.inline import get_load_summary_kb
+from app.bot.keyboards.inline import get_new_user_role_selector_kb
 from app.bot.keyboards.inline import get_role_selector_kb
 from app.bot.keyboards.inline import get_staff_list_kb
 from app.bot.keyboards.inline import get_user_card_kb
@@ -35,6 +40,7 @@ from app.bot.keyboards.reply import BTN_STAFF_MANAGEMENT
 from app.bot.keyboards.reply import BTN_TODAY_LOAD
 from app.bot.keyboards.reply import NEW_BOOKING_HINT_TEXT
 from app.bot.keyboards.reply import get_main_reply_kb
+from app.bot.states.booking_states import BookingState
 from app.config import TIMEZONE_NAME
 from app.config import UserRole
 from app.core.booking_service import BookingError
@@ -194,7 +200,8 @@ async def _render_staff_management_panel(
     header_text = (
         '<b>Управление командой автосервиса</b>\n\n'
         'Выберите сотрудника из списка ниже для просмотра профиля, '
-        'изменения роли, блокировки или удаления:'
+        'изменения роли, блокировки или удаления:\n'
+        'Либо нажмите <b>«Добавить сотрудника»</b> для регистрации нового мастера.'
     )
     await message.answer(
         text=header_text,
@@ -240,6 +247,149 @@ async def handle_staff_management_button(
         current_user=current_user,
         session=session,
     )
+
+
+@router.callback_query(StaffAction.filter(F.action == 'add_start'))
+async def handle_staff_add_start(
+    callback: CallbackQuery,
+    current_user: User,
+    state: FSMContext,
+) -> None:
+    """Запускает процесс добавления нового сотрудника через FSM.
+
+    Args:
+        callback: Запрос обратного вызова.
+        current_user: Авторизованный владелец.
+        state: Контекст FSM.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    await state.set_state(BookingState.waiting_for_new_user_id)
+    if callback.message:
+        await callback.message.answer(
+            '<b>Добавление нового сотрудника</b>\n\n'
+            'Введите числовой <b>Telegram ID</b> сотрудника '
+            '(его можно узнать, переслав сообщение в бота @userinfobot):',
+        )
+    await callback.answer()
+
+
+@router.message(BookingState.waiting_for_new_user_id, F.text)
+async def process_new_user_id_input(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Принимает Telegram ID создаваемого сотрудника.
+
+    Args:
+        message: Сообщение с числовым ID.
+        state: Контекст FSM.
+    """
+    if not message.text:
+        return
+
+    raw_id = message.text.strip().lstrip('@')
+    try:
+        tg_id = int(raw_id)
+    except ValueError:
+        await message.answer(
+            'Telegram ID должен состоять только из цифр. Попробуйте еще раз:',
+        )
+        return
+
+    await state.update_data({'new_user_tg_id': tg_id})
+    await state.set_state(BookingState.waiting_for_new_user_name)
+    await message.answer(
+        'Отлично. Теперь введите <b>Имя и Фамилию</b> сотрудника '
+        '(например: <i>Вова</i> или <i>Иван Иванов</i>):',
+    )
+
+
+@router.message(BookingState.waiting_for_new_user_name, F.text)
+async def process_new_user_name_input(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Принимает имя создаваемого сотрудника и запрашивает выбор роли.
+
+    Args:
+        message: Сообщение с именем сотрудника.
+        state: Контекст FSM.
+    """
+    if not message.text:
+        return
+
+    full_name = message.text.strip()
+    await state.update_data({'new_user_name': full_name})
+
+    await message.answer(
+        text=f'Выберите системную роль для сотрудника <b>{full_name}</b>:',
+        reply_markup=get_new_user_role_selector_kb(),
+    )
+
+
+@router.callback_query(NewUserRoleAction.filter())
+async def handle_new_user_role_chosen(
+    callback: CallbackQuery,
+    callback_data: NewUserRoleAction,
+    current_user: User,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """Завершает регистрацию нового сотрудника с выбранной ролью.
+
+    Args:
+        callback: Запрос обратного вызова.
+        callback_data: Выбранная роль.
+        current_user: Владелец сервиса.
+        state: Контекст FSM с данными ID и имени.
+        session: Асинхронная сессия базы данных.
+    """
+    if current_user.role != UserRole.OWNER:
+        await callback.answer('Доступ запрещен.', show_alert=True)
+        return
+
+    data = await state.get_data()
+    tg_id = data.get('new_user_tg_id')
+    full_name = data.get('new_user_name')
+
+    if not tg_id or not full_name:
+        await callback.answer('Данные устарели. Начните заново.', show_alert=True)
+        await state.clear()
+        return
+
+    role = UserRole(callback_data.role)
+    user_repo = UserRepository(session)
+    user = await user_repo.upsert_user(
+        telegram_id=tg_id,
+        full_name=full_name,
+        role=role,
+    )
+    await session.commit()
+    await state.clear()
+
+    role_ru = (
+        'Мастер'
+        if role == UserRole.MECHANIC
+        else 'Продавец'
+        if role == UserRole.SALES
+        else 'Владелец'
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            f'Сотрудник <b>{user.full_name}</b> (ID: <code>{user.telegram_id}</code>) '
+            f'успешно зарегистрирован с ролью <b>{role_ru}</b>.',
+        )
+
+    users = await user_repo.get_all_users()
+    if callback.message:
+        await callback.message.answer(
+            text='<b>Список сотрудников автосервиса:</b>',
+            reply_markup=get_staff_list_kb(users),
+        )
+    await callback.answer('Сотрудник добавлен.')
 
 
 @router.callback_query(StaffAction.filter(F.action == 'view'))
@@ -511,7 +661,8 @@ async def handle_staff_delete_confirm(
             header_text = (
                 '<b>Управление командой автосервиса</b>\n\n'
                 'Выберите сотрудника из списка ниже для просмотра профиля, '
-                'изменения роли, блокировки или удаления:'
+                'изменения роли, блокировки или удаления:\n'
+                'Либо нажмите <b>«Добавить сотрудника»</b> для регистрации нового мастера.'
             )
             await callback.message.edit_text(
                 text=header_text,
@@ -544,7 +695,8 @@ async def handle_staff_back_list(
         header_text = (
             '<b>Управление командой автосервиса</b>\n\n'
             'Выберите сотрудника из списка ниже для просмотра профиля, '
-            'изменения роли, блокировки или удаления:'
+            'изменения роли, блокировки или удаления:\n'
+            'Либо нажмите <b>«Добавить сотрудника»</b> для регистрации нового мастера.'
         )
         await callback.message.edit_text(
             text=header_text,
@@ -578,7 +730,9 @@ async def cmd_clear_calendars(
         report_lines = ['<b>Очистка завершена успешно:</b>\n']
         for cal_name, count in stats.items():
             report_lines.append(f'• {cal_name}: удалено {count} событий')
-        report_lines.append('\nВсе тестовые наряды и история изменений удалены из базы данных.')
+        report_lines.append(
+            '\nВсе тестовые наряды и история изменений удалены из базы данных.'
+        )
         await message.answer(text='\n'.join(report_lines))
     except BookingError as exc:
         await message.answer(f'Ошибка при очистке: <code>{exc}</code>')
@@ -590,7 +744,7 @@ async def cmd_add_user(
     current_user: User,
     session: AsyncSession,
 ) -> None:
-    """Добавляет нового сотрудника в систему владельцем сервиса.
+    """Добавляет нового сотрудника в систему владельцем сервиса по тексту.
 
     Args:
         message: Сообщение с аргументами команды.
@@ -604,19 +758,25 @@ async def cmd_add_user(
     if not message.text:
         return
 
-    parts = message.text.strip().split(maxsplit=3)
-    if len(parts) < 4:
+    tokens = message.text.strip().split()
+    if len(tokens) < 3:
         await message.answer(
             '<b>Формат команды:</b>\n'
-            '<code>/add_user &lt;telegram_id&gt; &lt;Имя&gt; &lt;РОЛЬ&gt;</code>\n\n'
+            '<code>/add_user &lt;telegram_id&gt; &lt;Имя Фамилия&gt; &lt;РОЛЬ&gt;</code>\n\n'
             '<b>Примеры:</b>\n'
             '<code>/add_user 123456789 Вова MECHANIC</code>\n'
-            '<code>/add_user 987654321 Иван SALES</code>\n'
+            '<code>/add_user 987654321 Иван Иванов SALES</code>\n'
             'Роли: MECHANIC (мастер), SALES (магазин), OWNER (владелец)',
         )
         return
 
-    _, raw_tg_id, full_name, raw_role = parts
+    raw_tg_id = tokens[1]
+    raw_role = tokens[-1]
+    full_name = ' '.join(tokens[2:-1]).strip()
+
+    if not full_name:
+        full_name = tokens[2]
+
     try:
         tg_id = int(raw_tg_id)
     except ValueError:

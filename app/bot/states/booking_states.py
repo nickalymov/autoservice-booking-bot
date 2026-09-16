@@ -11,7 +11,7 @@ from aiogram.fsm.state import StatesGroup
 
 
 class BookingState(StatesGroup):
-    """Группа состояний процесса бронирования записи.
+    """Группа состояний процесса бронирования записи и управления персоналом.
 
     Attributes:
         waiting_for_confirmation: Ожидание подтверждения карточки записи.
@@ -21,6 +21,8 @@ class BookingState(StatesGroup):
         waiting_for_missing_field: Ожидание ввода недостающего поля.
         waiting_for_reschedule_edit: Ожидание дополнительных правок переноса.
         waiting_for_master_selection: Ожидание выбора ответственного мастера.
+        waiting_for_new_user_id: Ожидание ввода Telegram ID нового сотрудника.
+        waiting_for_new_user_name: Ожидание ввода имени нового сотрудника.
     """
 
     waiting_for_confirmation = State()
@@ -30,3 +32,5 @@ class BookingState(StatesGroup):
     waiting_for_missing_field = State()
     waiting_for_reschedule_edit = State()
     waiting_for_master_selection = State()
+    waiting_for_new_user_id = State()
+    waiting_for_new_user_name = State()
