@@ -12,6 +12,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton
 from aiogram.types import InlineKeyboardMarkup
 
+from app.config import POST_NAMES
 from app.config import UserRole
 from app.database.models.appointment import Appointment
 from app.database.models.post import Post
@@ -94,6 +95,33 @@ class NewUserRoleAction(CallbackData, prefix='nwurol'):
     role: str
 
 
+class SundayChoiceAction(CallbackData, prefix='sndy'):
+    """Фабрика выбора действия при попытке записи на воскресенье."""
+
+    action: str
+    public_id: str
+
+
+class OvertimeChoiceAction(CallbackData, prefix='ovrt'):
+    """Фабрика выбора действия при сверхурочной записи."""
+
+    action: str
+    public_id: str
+
+
+class MasterOverlapChoiceAction(CallbackData, prefix='movl'):
+    """Фабрика выбора действия при накладке у конкретного мастера."""
+
+    action: str
+    public_id: str
+
+
+class ClosedApptAction(CallbackData, prefix='clsapp'):
+    """Фабрика просмотра закрытой заявки."""
+
+    public_id: str
+
+
 def get_confirmation_kb(public_id: str) -> InlineKeyboardMarkup:
     """Создает клавиатуру подтверждения записи.
 
@@ -126,6 +154,157 @@ def get_confirmation_kb(public_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text='Отменить',
                 callback_data=BookingAction(
+                    action='cancel',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_cancel_only_kb(public_id: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру с единственной кнопкой отмены черновика.
+
+    Args:
+        public_id: Публичный идентификатор заявки.
+
+    Returns:
+        Инлайн-клавиатура с кнопкой Отменить.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='❌ Отменить черновик',
+                callback_data=BookingAction(
+                    action='cancel',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_sunday_warning_kb(public_id: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру подтверждения записи на воскресенье по BR-002.
+
+    Args:
+        public_id: Публичный номер записи.
+
+    Returns:
+        Клавиатура выбора дня или отмены.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='Записать на воскресенье',
+                callback_data=SundayChoiceAction(
+                    action='confirm_sunday',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Перенести на понедельник',
+                callback_data=SundayChoiceAction(
+                    action='shift_monday',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Отменить',
+                callback_data=SundayChoiceAction(
+                    action='cancel',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_overtime_warning_kb(public_id: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру подтверждения сверхурочной работы по BR-010.
+
+    Args:
+        public_id: Публичный номер записи.
+
+    Returns:
+        Клавиатура подтверждения сверхурочной смены.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='Подтвердить сверхурочно',
+                callback_data=OvertimeChoiceAction(
+                    action='confirm_overtime',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Выбрать другое время',
+                callback_data=OvertimeChoiceAction(
+                    action='change_time',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Перенести на завтра',
+                callback_data=OvertimeChoiceAction(
+                    action='shift_tomorrow',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Отменить',
+                callback_data=OvertimeChoiceAction(
+                    action='cancel',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+    ])
+
+
+def get_master_overlap_warning_kb(public_id: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру подтверждения накладки у мастера по BR-009.
+
+    Args:
+        public_id: Публичный номер наряда.
+
+    Returns:
+        Инлайн-клавиатура с вариантами действия мастера.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text='Подтвердить всё равно',
+                callback_data=MasterOverlapChoiceAction(
+                    action='confirm_anyway',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Выбрать другое время',
+                callback_data=MasterOverlapChoiceAction(
+                    action='change_time',
+                    public_id=public_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text='Отмена',
+                callback_data=MasterOverlapChoiceAction(
                     action='cancel',
                     public_id=public_id,
                 ).pack(),
@@ -191,7 +370,7 @@ def get_post_selector_kb(
     for post in posts:
         keyboard.append([
             InlineKeyboardButton(
-                text=post.name,
+                text=POST_NAMES.get(post.code, post.name),
                 callback_data=PostAction(
                     post_code=post.code,
                     public_id=public_id,
@@ -218,7 +397,7 @@ def get_post_conflict_kb(
     for post in posts:
         keyboard.append([
             InlineKeyboardButton(
-                text=post.name,
+                text=POST_NAMES.get(post.code, post.name),
                 callback_data=PostAction(
                     post_code=post.code,
                     public_id=public_id,
@@ -251,21 +430,25 @@ def get_post_conflict_kb(
 def get_appointment_actions_kb(
     public_id: str,
     status: AppointmentStatus,
+    car_model: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Создает контекстное меню действий для записи.
 
     Args:
         public_id: Публичный идентификатор заявки.
         status: Текущий статус записи.
+        car_model: Опциональная модель автомобиля.
 
     Returns:
         Объект клавиатуры действий.
     """
     rows: list[list[InlineKeyboardButton]] = []
+    car_suffix = f' ({car_model})' if car_model else ''
+
     if status == AppointmentStatus.CONFIRMED:
         rows.append([
             InlineKeyboardButton(
-                text='Взять в работу',
+                text=f'▶️ В работу [{public_id}]{car_suffix}',
                 callback_data=StatusAction(
                     action='start',
                     public_id=public_id,
@@ -274,14 +457,14 @@ def get_appointment_actions_kb(
         ])
         rows.append([
             InlineKeyboardButton(
-                text='Перенести',
+                text='🔄 Перенести',
                 callback_data=StatusAction(
                     action='reschedule',
                     public_id=public_id,
                 ).pack(),
             ),
             InlineKeyboardButton(
-                text='Передать',
+                text='👥 Передать',
                 callback_data=StatusAction(
                     action='transfer',
                     public_id=public_id,
@@ -290,14 +473,14 @@ def get_appointment_actions_kb(
         ])
         rows.append([
             InlineKeyboardButton(
-                text='Не приехал',
+                text='❌ Не приехал',
                 callback_data=StatusAction(
                     action='no_show',
                     public_id=public_id,
                 ).pack(),
             ),
             InlineKeyboardButton(
-                text='Отмена',
+                text='🗑 Отмена',
                 callback_data=StatusAction(
                     action='cancel',
                     public_id=public_id,
@@ -307,14 +490,16 @@ def get_appointment_actions_kb(
     elif status == AppointmentStatus.IN_PROGRESS:
         rows.append([
             InlineKeyboardButton(
-                text='Завершить',
+                text=f'🏁 Завершить [{public_id}]{car_suffix}',
                 callback_data=StatusAction(
                     action='complete',
                     public_id=public_id,
                 ).pack(),
             ),
+        ])
+        rows.append([
             InlineKeyboardButton(
-                text='Отмена',
+                text=f'🗑 Отмена {public_id}',
                 callback_data=StatusAction(
                     action='cancel',
                     public_id=public_id,
@@ -322,6 +507,29 @@ def get_appointment_actions_kb(
             ),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_closed_appointments_kb(
+    appointments: Sequence[Appointment],
+) -> InlineKeyboardMarkup:
+    """Создает клавиатуру списка последних закрытых нарядов сервиса.
+
+    Args:
+        appointments: Список завершенных и отмененных нарядов.
+
+    Returns:
+        Инлайн-клавиатура со ссылками на детальные карточки.
+    """
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for appt in appointments:
+        btn_text = f'[{appt.public_id}] {appt.car_model} ({appt.status.value})'
+        keyboard.append([
+            InlineKeyboardButton(
+                text=btn_text,
+                callback_data=ClosedApptAction(public_id=appt.public_id).pack(),
+            ),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def get_mechanic_selector_kb(
@@ -432,7 +640,7 @@ def get_load_summary_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                text='Свободные окна',
+                text='Ближайшие свободные окна',
                 callback_data=MenuAction(action='free_slots').pack(),
             ),
         ],

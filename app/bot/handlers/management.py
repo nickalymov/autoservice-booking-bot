@@ -129,7 +129,7 @@ def format_reschedule_card_text(
     new_start_dt: datetime.datetime,
     new_post_code: PostCode,
 ) -> str:
-    """Формирует текст блока сравнения Было / Будет для переноса наряда.
+    """Формирует симметричный блок Было / Будет с кодами постов по BR-013.
 
     Args:
         appointment: Текущая запись на ремонт.
@@ -142,9 +142,10 @@ def format_reschedule_card_text(
     timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
     old_start_msk = appointment.start_datetime.astimezone(timezone)
     old_end_msk = appointment.end_datetime.astimezone(timezone)
-    old_post_label = (
-        appointment.post.name if appointment.post else 'Без поста'
+    old_post_code = (
+        appointment.post.code if appointment.post else PostCode.NO_POST
     )
+    old_post_label = POST_NAMES.get(old_post_code, str(old_post_code))
     old_line = (
         f'{old_start_msk.strftime("%d.%m, %H:%M")}–'
         f'{old_end_msk.strftime("%H:%M")}, {old_post_label}'
@@ -258,28 +259,66 @@ async def handle_button_reschedule_click(
     callback: CallbackQuery,
     callback_data: StatusAction,
     state: FSMContext,
+    booking_service: BookingService,
+    session: AsyncSession,
 ) -> None:
-    """Инициирует интерактивный перенос наряда при нажатии кнопки в списке.
+    """Инициирует перенос с показом контекста наряда и окон по BR-013.
 
     Args:
         callback: Запрос обратного вызова Telegram.
         callback_data: Данные действия с публичным номером.
         state: Контекст конечного автомата FSM.
+        booking_service: Сервис бронирования.
+        session: Асинхронная сессия базы данных.
     """
+    appt_repo = AppointmentRepository(session)
+    appointment = await appt_repo.get_by_public_id(callback_data.public_id)
+    if appointment is None:
+        await callback.answer('Запись не найдена.', show_alert=True)
+        return
+
     await state.set_data({
         'reschedule_public_id': callback_data.public_id,
     })
     await state.set_state(BookingState.waiting_for_reschedule_edit)
 
-    if callback.message:
-        await callback.message.answer(
-            text=(
-                f'На какое время или пост перенести запись '
-                f'<b>{callback_data.public_id}</b>?\n'
-                'Напишите или надиктуйте голосом (например: '
-                '<i>«Завтра на 14:00 на первый подъемник»</i>):'
-            ),
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    start_str = appointment.start_datetime.astimezone(timezone).strftime('%d.%m %H:%M')
+    end_str = appointment.end_datetime.astimezone(timezone).strftime('%H:%M')
+    post_label = (
+        POST_NAMES.get(appointment.post.code, appointment.post.name)
+        if appointment.post
+        else 'Без поста'
+    )
+
+    nearest_slots = await booking_service.get_nearest_free_slots(
+        duration_minutes=appointment.planned_duration_minutes,
+        days_ahead=3,
+    )
+    slots_preview: list[str] = []
+    for slot in nearest_slots[:4]:
+        slots_preview.append(
+            f'• {slot.target_date.strftime("%d.%m")} '
+            f'{slot.start_time.strftime("%H:%M")}–{slot.end_time.strftime("%H:%M")} '
+            f'({slot.post_name})'
         )
+
+    slots_text = (
+        '\n'.join(slots_preview)
+        if slots_preview
+        else 'Свободные окна не найдены.'
+    )
+
+    prompt_text = (
+        f'На какое время или пост перенести запись <b>{appointment.public_id} — {appointment.car_model}</b>?\n'
+        f'Пост: {post_label} | Время: {start_str}–{end_str}\n\n'
+        f'<b>Ближайшие свободные окна:</b>\n{slots_text}\n\n'
+        'Напишите время (например: <i>«на завтра на 15:00 на подъемник 1»</i>) '
+        'или напишите: <i>«на ближайшее свободное окно»</i>:'
+    )
+
+    if callback.message:
+        await callback.message.answer(text=prompt_text)
     await callback.answer()
 
 
@@ -317,12 +356,13 @@ async def handle_confirm_reschedule(
             new_start_dt=new_start_dt,
             new_post_code=new_post_code,
             user_telegram_id=current_user.telegram_id,
+            allow_sunday=True,
+            allow_overtime=True,
         )
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Запись <b>{updated.public_id}</b> успешно перенесена.\n'
-                    f'Автомобиль: {updated.car_model}\n'
+                    f'Запись <b>[{updated.public_id}] ({updated.car_model})</b> успешно перенесена.\n'
                     f'Новое время: '
                     f'{updated.start_datetime.strftime("%d.%m.%Y, %H:%M")}'
                 ),
@@ -384,15 +424,17 @@ async def process_reschedule_edit_input(
     bot: Bot,
     state: FSMContext,
     ai_service: AIService,
+    booking_service: BookingService,
     session: AsyncSession,
 ) -> None:
-    """Обрабатывает дополнительные правки при переносе записи по п. 10.4 ТЗ.
+    """Обрабатывает ввод нового времени/поста или запрос на ближайшее окно по BR-013.
 
     Args:
         message: Сообщение мастера с уточнениями.
         bot: Клиент Telegram Bot API.
         state: Контекст FSM.
         ai_service: Сервис искусственного интеллекта.
+        booking_service: Сервис бронирования.
         session: Асинхронная сессия базы данных.
     """
     raw_text = await extract_message_text(
@@ -418,17 +460,44 @@ async def process_reschedule_edit_input(
         await state.clear()
         return
 
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    low_text = raw_text.lower()
+
+    if 'ближайш' in low_text or 'окно' in low_text or 'свободн' in low_text:
+        nearest_slots = await booking_service.get_nearest_free_slots(
+            duration_minutes=appointment.planned_duration_minutes,
+            days_ahead=5,
+        )
+        if not nearest_slots:
+            await message.answer('Ближайших свободных окон на будущее не найдено.')
+            return
+
+        slot = nearest_slots[0]
+        new_start_dt = datetime.datetime.combine(
+            slot.target_date,
+            slot.start_time,
+            tzinfo=timezone,
+        )
+        new_post_code = slot.post_code
+        await show_reschedule_preview(
+            message=message,
+            state=state,
+            appointment=appointment,
+            new_start_dt=new_start_dt,
+            new_post_code=new_post_code,
+        )
+        return
+
     try:
         extraction = await ai_service.extract_appointment(raw_text=raw_text)
     except AIServiceError:
         await message.answer('Не удалось извлечь новое время или пост.')
         return
 
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
     current_date_str = appointment.start_datetime.astimezone(
         timezone,
     ).strftime('%Y-%m-%d')
-    target_date = extraction.reschedule_new_date or current_date_str
+    target_date = extraction.reschedule_new_date or extraction.start_date or current_date_str
     target_time = extraction.reschedule_new_time or extraction.start_time
 
     if not target_time:
@@ -442,6 +511,14 @@ async def process_reschedule_edit_input(
         ).replace(tzinfo=timezone)
     except ValueError:
         await message.answer('Некорректный формат времени.')
+        return
+
+    now_dt = datetime.datetime.now(timezone)
+    if new_start_dt < now_dt:
+        await message.answer(
+            f'Указанное время ({new_start_dt.strftime("%d.%m.%Y %H:%M")}) '
+            f'уже прошло. Текущее время: {now_dt.strftime("%H:%M")}.'
+        )
         return
 
     new_post_code = extraction.reschedule_new_post or (
@@ -480,13 +557,13 @@ async def handle_start_work(
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Запись <b>{updated.public_id}</b> переведена в работу.\n'
-                    f'Автомобиль: {updated.car_model}\n'
+                    f'Запись <b>[{updated.public_id}] ({updated.car_model})</b> переведена в работу.\n'
                     f'Мастер: {current_user.full_name}'
                 ),
                 reply_markup=get_appointment_actions_kb(
                     public_id=updated.public_id,
                     status=AppointmentStatus.IN_PROGRESS,
+                    car_model=updated.car_model,
                 ),
             )
         await callback.answer('Машина принята в работу.')
@@ -517,8 +594,8 @@ async def handle_no_show_work(
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Запись <b>{updated.public_id}</b> отмечена как '
-                    f'«Не приехал». Пост освобожден.'
+                    f'Запись <b>[{updated.public_id}] ({updated.car_model})</b> отмечена как '
+                    '«Не приехал». Пост освобожден.'
                 ),
             )
         await callback.answer('Зафиксирована неявка клиента.')
@@ -556,7 +633,9 @@ async def handle_complete_work(
 
     if now_dt < appointment_end_msk:
         post_label = (
-            appointment.post.name if appointment.post else 'пост'
+            POST_NAMES.get(appointment.post.code, appointment.post.name)
+            if appointment.post
+            else 'пост'
         )
         planned_end_str = appointment_end_msk.strftime('%H:%M')
         actual_time_str = now_dt.strftime('%H:%M')
@@ -583,7 +662,7 @@ async def handle_complete_work(
         )
         if callback.message:
             await callback.message.edit_text(
-                text=f'Заказ-наряд <b>{appointment.public_id}</b> завершен.',
+                text=f'Заказ-наряд <b>[{appointment.public_id}] ({appointment.car_model})</b> завершен.',
             )
         await callback.answer('Работы успешно завершены.')
     except BookingError as exc:
@@ -619,7 +698,7 @@ async def handle_early_release_decision(
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Заказ-наряд <b>{updated.public_id}</b> закрыт.\n'
+                    f'Заказ-наряд <b>[{updated.public_id}] ({updated.car_model})</b> закрыт.\n'
                     f'{status_msg}'
                 ),
             )
@@ -707,10 +786,15 @@ async def handle_send_transfer(
             f'{start_msk.strftime("%d.%m, %H:%M")}–'
             f'{end_msk.strftime("%H:%M")}'
         )
-        post_str = updated.post.name if updated.post else 'Без поста'
+        post_str = (
+            POST_NAMES.get(updated.post.code, updated.post.name)
+            if updated.post
+            else 'Без поста'
+        )
 
         offer_text = (
             f'<b>{current_user.full_name}</b> предлагает передать вам запись:\n'
+            f'<b>Номер:</b> [{updated.public_id}]\n'
             f'<b>Время:</b> {time_str}\n'
             f'<b>Пост:</b> {post_str}\n'
             f'<b>Автомобиль:</b> {updated.car_model}\n'
@@ -729,7 +813,7 @@ async def handle_send_transfer(
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Запрос на передачу записи <b>{updated.public_id}</b> '
+                    f'Запрос на передачу записи <b>[{updated.public_id}] ({updated.car_model})</b> '
                     f'отправлен мастеру {target_master.full_name}.'
                 ),
             )
@@ -777,12 +861,12 @@ async def handle_transfer_decision(
             if callback.message:
                 await callback.message.edit_text(
                     text=(
-                        f'Вы приняли запись <b>{updated.public_id}</b> '
-                        f'({updated.car_model}).'
+                        f'Вы приняли запись <b>[{updated.public_id}] ({updated.car_model})</b>.'
                     ),
                     reply_markup=get_appointment_actions_kb(
                         public_id=updated.public_id,
                         status=updated.status,
+                        car_model=updated.car_model,
                     ),
                 )
             if original_master_tg_id:
@@ -790,7 +874,7 @@ async def handle_transfer_decision(
                     chat_id=original_master_tg_id,
                     text=(
                         f'Мастер {current_user.full_name} принял '
-                        f'запись <b>{updated.public_id}</b>.'
+                        f'запись <b>[{updated.public_id}] ({updated.car_model})</b>.'
                     ),
                 )
             await callback.answer('Запись успешно принята.')
@@ -803,7 +887,7 @@ async def handle_transfer_decision(
                 await callback.message.edit_text(
                     text=(
                         f'Вы отклонили передачу записи '
-                        f'<b>{updated.public_id}</b>.'
+                        f'<b>[{updated.public_id}] ({updated.car_model})</b>.'
                     ),
                 )
             if original_master_tg_id:
@@ -811,7 +895,7 @@ async def handle_transfer_decision(
                     chat_id=original_master_tg_id,
                     text=(
                         f'Мастер {current_user.full_name} отклонил '
-                        f'передачу записи <b>{updated.public_id}</b>.'
+                        f'передачу записи <b>[{updated.public_id}] ({updated.car_model})</b>.'
                     ),
                 )
             await callback.answer('Передача отклонена.')
@@ -842,8 +926,8 @@ async def handle_cancel_appointment(
         if callback.message:
             await callback.message.edit_text(
                 text=(
-                    f'Запись <b>{updated.public_id}</b> отменена.\n'
-                    f'Слот поста освобожден.'
+                    f'Запись <b>[{updated.public_id}] ({updated.car_model})</b> отменена.\n'
+                    'Слот поста освобожден.'
                 ),
             )
         await callback.answer('Запись отменена.')

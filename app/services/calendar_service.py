@@ -1,13 +1,14 @@
 """Модуль сервиса интеграции с Google Календарём.
 
 Обеспечивает синхронизацию подтвержденных записей на ремонт
-с облачными календарями рабочих постов и общим обзорным календарём.
+с облачными календарями рабочих постов и календарем «Без поста».
 """
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any
+import zoneinfo
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -28,12 +29,14 @@ class CalendarServiceError(Exception):
 
 def _build_event_body(
     appointment: Appointment,
+    post: Post | None = None,
     master_name: str | None = None,
 ) -> dict[str, Any]:
     """Формирует тело запроса события для Google Calendar API.
 
     Args:
         appointment: Объект записи на обслуживание.
+        post: Рабочий пост или None.
         master_name: Опциональное явно переданное имя мастера.
 
     Returns:
@@ -46,19 +49,35 @@ def _build_event_body(
         else:
             resolved_master_name = 'Мастер'
 
-    summary = (
-        f'[{appointment.public_id}] {appointment.car_model} '
-        f'({resolved_master_name})'
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    start_dt_msk = appointment.start_datetime.astimezone(timezone)
+    start_time_str = start_dt_msk.strftime('%H:%M')
+
+    post_code_str = (
+        post.code.value
+        if (post and post.code != PostCode.NO_POST)
+        else 'Без поста'
     )
+    post_full_name = (
+        POST_NAMES.get(post.code, post.name)
+        if post
+        else 'Без поста'
+    )
+
+    summary = (
+        f'[{appointment.public_id}] {resolved_master_name} - '
+        f'{start_time_str} - {appointment.car_model} - {post_code_str}'
+    )
+
     description_parts: list[str] = [
+        f'Пост: {post_full_name}',
         f'Клиент: {appointment.client_name or "Не указано"}',
         f'Телефон: {appointment.client_phone}',
         f'Работы: {appointment.work_description}',
+        f'Мастер: {resolved_master_name}',
     ]
     if appointment.license_plate:
-        description_parts.append(
-            f'Госномер: {appointment.license_plate}',
-        )
+        description_parts.append(f'Госномер: {appointment.license_plate}')
     if appointment.vin:
         description_parts.append(f'VIN: {appointment.vin}')
 
@@ -132,18 +151,18 @@ class GoogleCalendarService:
         Returns:
             Идентификатор календаря Google в виде строки.
         """
-        overview_id = (
+        no_post_id = (
             self._settings.google_calendar_overview_id or 'primary'
         )
         if post_code == PostCode.P1:
-            return self._settings.google_calendar_p1_id or overview_id
+            return self._settings.google_calendar_p1_id or no_post_id
         if post_code == PostCode.P2:
-            return self._settings.google_calendar_p2_id or overview_id
+            return self._settings.google_calendar_p2_id or no_post_id
         if post_code == PostCode.P3:
-            return self._settings.google_calendar_p3_id or overview_id
+            return self._settings.google_calendar_p3_id or no_post_id
         if post_code == PostCode.P4:
-            return self._settings.google_calendar_p4_id or overview_id
-        return overview_id
+            return self._settings.google_calendar_p4_id or no_post_id
+        return no_post_id
 
     async def verify_calendars_access(self) -> dict[str, str | None]:
         """Проверяет доступность всех сконфигурированных календарей.
@@ -158,7 +177,7 @@ class GoogleCalendarService:
             (POST_NAMES[PostCode.P3], self._settings.google_calendar_p3_id),
             (POST_NAMES[PostCode.P4], self._settings.google_calendar_p4_id),
             (
-                'Автосервис — Обзорная загрузка',
+                'Календарь «Без поста»',
                 self._settings.google_calendar_overview_id,
             ),
         ]
@@ -218,6 +237,7 @@ class GoogleCalendarService:
         calendar_id = self._get_calendar_id(post_code)
         event_body = _build_event_body(
             appointment=appointment,
+            post=post,
             master_name=master_name,
         )
 
@@ -267,6 +287,7 @@ class GoogleCalendarService:
         calendar_id = self._get_calendar_id(post_code)
         event_body = _build_event_body(
             appointment=appointment,
+            post=post,
             master_name=master_name,
         )
 
@@ -337,7 +358,7 @@ class GoogleCalendarService:
             ('P2', self._settings.google_calendar_p2_id),
             ('P3', self._settings.google_calendar_p3_id),
             ('P4', self._settings.google_calendar_p4_id),
-            ('Обзорный', self._settings.google_calendar_overview_id),
+            ('Без поста', self._settings.google_calendar_overview_id),
         ]
 
         deleted_counts: dict[str, int] = {}

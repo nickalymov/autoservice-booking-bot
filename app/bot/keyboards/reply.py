@@ -11,9 +11,10 @@ from app.config import UserRole
 
 BTN_NEW_BOOKING: str = '🎙 Новая запись'
 BTN_TODAY_LOAD: str = '📅 Загрузка сегодня'
-BTN_FREE_SLOTS: str = '⏱ Свободные окна'
+BTN_FREE_SLOTS: str = '⏱ Ближайшие свободные окна'
 BTN_MY_BOOKINGS: str = '📋 Мои записи'
 BTN_ALL_BOOKINGS: str = '🏬 Все записи сервиса'
+BTN_CLOSED_BOOKINGS: str = '📁 Закрытые записи'
 BTN_STAFF_MANAGEMENT: str = '👥 Сотрудники'
 BTN_REMINDERS_TOGGLE: str = '🔔 Напоминания'
 
@@ -61,16 +62,23 @@ def get_main_reply_kb(
     if role == UserRole.OWNER:
         rows.append([
             KeyboardButton(text=BTN_ALL_BOOKINGS),
-            KeyboardButton(text=BTN_STAFF_MANAGEMENT),
+            KeyboardButton(text=BTN_CLOSED_BOOKINGS),
         ])
-        rows.append([KeyboardButton(text=BTN_REMINDERS_TOGGLE)])
+        rows.append([
+            KeyboardButton(text=BTN_STAFF_MANAGEMENT),
+            KeyboardButton(text=BTN_REMINDERS_TOGGLE),
+        ])
     elif role == UserRole.SALES:
         rows.append([
             KeyboardButton(text=BTN_ALL_BOOKINGS),
+            KeyboardButton(text=BTN_CLOSED_BOOKINGS),
+        ])
+        rows.append([KeyboardButton(text=BTN_REMINDERS_TOGGLE)])
+    else:
+        rows.append([
+            KeyboardButton(text=BTN_CLOSED_BOOKINGS),
             KeyboardButton(text=BTN_REMINDERS_TOGGLE),
         ])
-    else:
-        rows.append([KeyboardButton(text=BTN_REMINDERS_TOGGLE)])
 
     return ReplyKeyboardMarkup(
         keyboard=rows,

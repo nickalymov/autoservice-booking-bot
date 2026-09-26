@@ -23,6 +23,7 @@ from app.bot.handlers.management import get_early_release_kb
 from app.bot.handlers.management import show_reschedule_preview
 from app.bot.keyboards.inline import get_multiple_cars_selector_kb
 from app.bot.keyboards.reply import BTN_ALL_BOOKINGS
+from app.bot.keyboards.reply import BTN_CLOSED_BOOKINGS
 from app.bot.keyboards.reply import BTN_FREE_SLOTS
 from app.bot.keyboards.reply import BTN_MY_BOOKINGS
 from app.bot.keyboards.reply import BTN_NEW_BOOKING
@@ -52,6 +53,7 @@ _IGNORED_REPLY_BUTTONS: frozenset[str] = frozenset({
     BTN_FREE_SLOTS,
     BTN_MY_BOOKINGS,
     BTN_ALL_BOOKINGS,
+    BTN_CLOSED_BOOKINGS,
     BTN_STAFF_MANAGEMENT,
     BTN_REMINDERS_TOGGLE,
 })
@@ -179,7 +181,7 @@ async def prompt_early_release_for_appointment(
 
     await message.answer(
         text=(
-            f'Наряд <b>{appointment.public_id}</b> ({appointment.car_model}).\n'
+            f'Наряд <b>[{appointment.public_id}] ({appointment.car_model})</b>.\n'
             f'Запись была запланирована до {planned_end_str}.\n'
             f'Освободить {post_label} с {actual_time_str}?'
         ),
@@ -327,15 +329,6 @@ async def _process_appointment_text(
         time_str=extraction.start_time,
     )
 
-    if start_dt is not None and start_dt.weekday() == 6:
-        await message.answer(
-            text=(
-                'Воскресенье — выходной день автосервиса.\n'
-                'Запись осуществляется с понедельника по субботу.'
-            ),
-        )
-        return
-
     normative_duration = estimate_duration_minutes(
         work_description=extraction.work_description,
         work_items=extraction.work_items,
@@ -405,7 +398,7 @@ async def handle_voice(
     current_user: User,
     session: AsyncSession,
 ) -> None:
-    """Обрабатывает входящее голосовое сообщение от сотрудника.
+    """Обрабатывает входящее голосовое сообщение со сбросом зависшего FSM.
 
     Args:
         message: Сообщение с голосовым вложением.
@@ -419,6 +412,7 @@ async def handle_voice(
     if not message.voice:
         return
 
+    await state.clear()
     await message.answer(text='Обрабатываю аудио...')
 
     file = await bot.get_file(message.voice.file_id)
@@ -464,7 +458,7 @@ async def handle_text_booking(
     current_user: User,
     session: AsyncSession,
 ) -> None:
-    """Обрабатывает произвольный текстовый ввод заявки по разделу 10.1 ТЗ.
+    """Обрабатывает текстовый ввод заявки по разделу 10.1 ТЗ со сбросом FSM.
 
     Args:
         message: Сообщение с текстом заявки.
@@ -477,6 +471,7 @@ async def handle_text_booking(
     if not message.text or message.text in _IGNORED_REPLY_BUTTONS:
         return
 
+    await state.clear()
     await message.answer(text='Анализирую данные сообщения...')
 
     await _process_appointment_text(

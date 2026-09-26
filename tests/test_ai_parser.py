@@ -52,7 +52,7 @@ def test_json_schema_validity() -> None:
 
 
 def test_to_strict_json_schema_removes_defs_and_defaults() -> None:
-    """Проверяет устранение $defs и флагов default в строгой схеме."""
+    """Проверяет устранение defs и флагов default в строгой схеме."""
     raw_schema = {
         '$defs': {
             'StatusEnum': {
@@ -97,13 +97,13 @@ def test_system_prompt_builder() -> None:
 
     assert '2026-09-09 14:30' in prompt
     assert 'среда' in prompt
-    assert 'Воскресенье — выходной' in prompt
+    assert 'Воскресенье обычно выходной' in prompt
     assert 'P1' in prompt
     assert 'P2' in prompt
     assert 'P3' in prompt
     assert 'P4' in prompt
     assert 'NO_POST' in prompt
-    assert '30 минут' in prompt
+    assert '30 мин' in prompt
 
 
 def test_parse_tz_full_voice_message() -> None:

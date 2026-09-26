@@ -18,6 +18,8 @@ from pydantic_settings import SettingsConfigDict
 
 TIMEZONE_NAME: str = 'Europe/Moscow'
 SCHEDULE_STEP_MINUTES: int = 30
+WORK_DAY_START_HOUR: int = 9
+WORK_DAY_END_HOUR: int = 20
 
 
 class PostCode(str, enum.Enum):
@@ -39,10 +41,10 @@ class UserRole(str, enum.Enum):
 
 
 POST_NAMES: dict[PostCode, str] = {
-    PostCode.P1: 'P1 — обычная яма',
-    PostCode.P2: 'P2 — подъемник 1',
-    PostCode.P3: 'P3 — подъемник 2',
-    PostCode.P4: 'P4 — яма / сход-развал',
+    PostCode.P1: 'Пост 1 (Обычная яма)',
+    PostCode.P2: 'Пост 2 (Подъемник 1)',
+    PostCode.P3: 'Пост 3 (Подъемник 2)',
+    PostCode.P4: 'Пост 4 (Яма / сход-развал)',
     PostCode.NO_POST: 'Без поста',
 }
 
@@ -58,6 +60,9 @@ class Settings(BaseSettings):
         vsegpt_base_url: Базовый адрес API VseGPT.
         vsegpt_chat_model: Модель для текстового анализа и извлечения данных.
         vsegpt_stt_model: Модель для распознавания голосовых сообщений.
+        groq_api_key: API-ключ для скоростного сервиса распознавания речи Groq.
+        groq_base_url: Базовый адрес API Groq.
+        groq_stt_model: Модель Whisper на инфраструктуре Groq.
         db_host: Хост сервера базы данных PostgreSQL.
         db_port: Порт сервера базы данных PostgreSQL.
         db_user: Имя пользователя базы данных.
@@ -69,7 +74,7 @@ class Settings(BaseSettings):
         google_calendar_p2_id: Идентификатор календаря поста P2.
         google_calendar_p3_id: Идентификатор календаря поста P3.
         google_calendar_p4_id: Идентификатор календаря поста P4.
-        google_calendar_overview_id: Идентификатор общего календаря.
+        google_calendar_overview_id: Идентификатор календаря для записей без поста.
     """
 
     bot_token: SecretStr = Field(
@@ -99,7 +104,20 @@ class Settings(BaseSettings):
     )
     vsegpt_stt_model: str = Field(
         default='stt-openai/whisper-1',
-        description='Идентификатор модели для транскрибации речи',
+        description='Идентификатор модели для транскрибации речи в VseGPT',
+    )
+
+    groq_api_key: SecretStr | None = Field(
+        default=None,
+        description='API-ключ для скоростной транскрибации речи Groq',
+    )
+    groq_base_url: str = Field(
+        default='https://api.groq.com/openai/v1',
+        description='Базовый URL эндпоинта Groq API',
+    )
+    groq_stt_model: str = Field(
+        default='whisper-large-v3-turbo',
+        description='Модель транскрибации Whisper на мощностях Groq',
     )
 
     db_host: str = Field(
@@ -149,7 +167,7 @@ class Settings(BaseSettings):
     )
     google_calendar_overview_id: str | None = Field(
         default=None,
-        description='ID общего обзорного Google-календаря',
+        description='ID Google-календаря для записей без поста',
     )
 
     model_config = SettingsConfigDict(

@@ -34,6 +34,43 @@ from app.schemas.appointment import AppointmentSource
 from app.schemas.appointment import AppointmentStatus
 
 
+def _get_future_workday(
+    days_ahead: int = 2,
+    hour: int = 10,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает дату и время в будущем для рабочего дня автосервиса."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=days_ahead)
+    while candidate_dt.weekday() == 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _get_future_sunday(
+    hour: int = 10,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает дату и время в будущем для ближайшего воскресенья."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=1)
+    while candidate_dt.weekday() != 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
 def test_duration_estimator_norms() -> None:
     """Проверяет соблюдение нормативной базы времени и кратность 30 минутам."""
     assert estimate_duration_minutes(
@@ -85,8 +122,7 @@ async def test_sales_booking_assigns_mechanic(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Проверяет назначение мастера при создании записи продавцом магазина."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     async with session_factory() as session:
         user_repo = UserRepository(session)
@@ -121,8 +157,7 @@ async def test_sunday_is_off_validation(
     booking_service: BookingService,
 ) -> None:
     """Проверяет запрет записи на воскресенье согласно п. 5 ТЗ."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    sunday_dt = datetime.datetime(2026, 9, 20, 10, 0, tzinfo=timezone)
+    sunday_dt = _get_future_sunday(hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='TEST-SUN',
@@ -143,7 +178,7 @@ async def test_sunday_is_off_validation(
             draft=draft,
             user_telegram_id=101,
         )
-    assert 'Воскресенье' in str(exc_info.value)
+    assert 'воскресенье' in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
@@ -151,8 +186,7 @@ async def test_reschedule_flow(
     booking_service: BookingService,
 ) -> None:
     """Проверяет перенос записи на новый временной слот и пост (п. 10.4 ТЗ)."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='RESCH-01',
@@ -173,7 +207,7 @@ async def test_reschedule_flow(
     )
     assert created.source == AppointmentSource.TEXT
 
-    new_time = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=timezone)
+    new_time = start_time + datetime.timedelta(hours=2)
     rescheduled = await booking_service.reschedule_appointment(
         public_id=created.public_id,
         new_start_dt=new_time,
@@ -191,8 +225,7 @@ async def test_mark_no_show_flow(
     booking_service: BookingService,
 ) -> None:
     """Проверяет смену статуса на NO_SHOW при неявке клиента (п. 10.8 ТЗ)."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='NOSHOW-01',
@@ -231,8 +264,7 @@ async def test_post_collisions_and_adjacent_slots(
     booking_service: BookingService,
 ) -> None:
     """Проверяет недопустимость пересечений на одном посту."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='TEST-001',
@@ -254,8 +286,8 @@ async def test_post_collisions_and_adjacent_slots(
     )
     assert created.id is not None
 
-    overlap_start = datetime.datetime(2026, 9, 15, 10, 30, tzinfo=timezone)
-    overlap_end = datetime.datetime(2026, 9, 15, 11, 0, tzinfo=timezone)
+    overlap_start = start_time + datetime.timedelta(minutes=30)
+    overlap_end = start_time + datetime.timedelta(minutes=60)
     check_result = await booking_service.check_slot(
         post_code=PostCode.P1,
         start_dt=overlap_start,
@@ -283,8 +315,8 @@ async def test_post_collisions_and_adjacent_slots(
             user_telegram_id=101,
         )
 
-    adjacent_start = datetime.datetime(2026, 9, 15, 11, 30, tzinfo=timezone)
-    adjacent_end = datetime.datetime(2026, 9, 15, 12, 30, tzinfo=timezone)
+    adjacent_start = start_time + datetime.timedelta(minutes=90)
+    adjacent_end = start_time + datetime.timedelta(minutes=150)
     adjacent_check = await booking_service.check_slot(
         post_code=PostCode.P1,
         start_dt=adjacent_start,
@@ -295,7 +327,7 @@ async def test_post_collisions_and_adjacent_slots(
     parallel_check = await booking_service.check_slot(
         post_code=PostCode.P2,
         start_dt=start_time,
-        end_dt=datetime.datetime(2026, 9, 15, 11, 30, tzinfo=timezone),
+        end_dt=start_time + datetime.timedelta(minutes=90),
     )
     assert parallel_check.is_available is True
 
@@ -305,8 +337,7 @@ async def test_no_post_overlap_allowed(
     booking_service: BookingService,
 ) -> None:
     """Проверяет правило параллельной записи на виртуальный пост «Без поста»."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 14, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=14, minute=0)
 
     draft1 = AppointmentDraft(
         draft_id='NO-POST-1',
@@ -352,8 +383,7 @@ async def test_appointment_transfer_flow(
     booking_service: BookingService,
 ) -> None:
     """Проверяет двухэтапный сценарий успешной передачи заявки."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 16, 12, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=3, hour=12, minute=0)
 
     draft = AppointmentDraft(
         draft_id='TRANS-01',
@@ -450,8 +480,7 @@ async def test_mechanic_cannot_manage_other_mechanic_appointment_in_service(
     booking_service: BookingService,
 ) -> None:
     """Проверяет блокировку изменения чужих нарядов мастером в сервисе."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 15, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='RBAC-SVC-01',

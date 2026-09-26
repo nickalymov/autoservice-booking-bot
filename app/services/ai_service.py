@@ -1,9 +1,11 @@
 """Модуль сервиса искусственного интеллекта автосервиса.
 
 Обеспечивает асинхронную транскрибацию голосовых сообщений
-с механизмом быстрого каскадного переключения моделей и извлечение
-структурированных параметров записи через модели VseGPT.
+с механизмом быстрого каскадного переключения моделей (Groq, VseGPT)
+и извлечение структурированных параметров записи через модели LLM.
 """
+
+from __future__ import annotations
 
 import asyncio
 import datetime
@@ -65,33 +67,41 @@ def build_system_prompt(current_dt: datetime.datetime) -> str:
         'заявки на ремонт от мастеров и продавцов.\n'
         f'Текущая дата и время (Москва): {date_str} {time_str}, '
         f'день недели: {weekday_name}.\n'
-        'График работы сервиса: понедельник–суббота. Воскресенье — выходной!\n\n'
-        'Твоя задача — классифицировать намерение мастера (intent):\n'
-        '1. CREATE — создание новой записи.\n'
-        '2. RESCHEDULE — перенос или изменение существующей записи.\n'
-        '3. COMPLETE — завершение работ по автомобилю.\n\n'
-        'Правила для намерения CREATE:\n'
-        '- Извлеки car_model, start_date, start_time, client_phone, '
+        'График работы сервиса: понедельник–суббота (09:00–20:00). '
+        'Воскресенье обычно выходной.\n\n'
+        'КРИТИЧЕСКИЕ ПРАВИЛА ИЗВЛЕЧЕНИЯ ДАННЫХ:\n'
+        '1. СТРОЖАЙШИЙ ЗАПРЕТ НА ВЫДУМЫВАНИЕ ВРЕМЕНИ:\n'
+        '   - Если пользователь НЕ назвал точное время в сообщении, '
+        'поле start_time ОБЯЗАНО быть null!\n'
+        '   - Категорически запрещено подставлять 09:00, начало смены '
+        'или текущее время, если времени нет в тексте пользователя!\n'
+        '   - Если время названо (например, 21:00) — извлеки ровно его.\n\n'
+        '2. ДАТА:\n'
+        '   - Если дата не названа, но названо только время: если сегодня '
+        'воскресенье, укажи дату воскресенья, не сдвигай самовольно на понедельник!\n'
+        '   - Если пользователь говорит "завтра" в субботу, укажи дату воскресенья.\n\n'
+        '3. КЛАССИФИКАЦИЯ НАМЕРЕНИЙ (intent):\n'
+        '   - CREATE — создание новой записи.\n'
+        '   - RESCHEDULE — перенос или изменение существующей записи.\n'
+        '   - COMPLETE — завершение работ по автомобилю.\n\n'
+        '4. ПРАВИЛА ДЛЯ CREATE:\n'
+        '   - Извлеки car_model, start_date, start_time, client_phone, '
         'work_description, work_items, suggested_duration_minutes, post_code.\n'
-        '- Шаг времени: 30 минут.\n'
-        '- Нормативы длительности работ сервиса:\n'
-        '  * замена ГРМ, сцепления: 180 мин (3 часа);\n'
-        '  * подвеска, стойки стабилизатора, рычаги: 90 мин (1.5 часа);\n'
-        '  * замена тормозных колодок, тормозных дисков, сход-развал: 60 мин;\n'
-        '  * замена масла, фильтров, свечей, лампочек: 30 мин;\n'
-        '  * если мастер не назвал точное время, используй эти нормы!\n'
-        '- Если дата выпадает на воскресенье, укажи в clarification_needed: '
-        '"Воскресенье — выходной день автосервиса. Выберите рабочий день."\n'
-        '- Сопоставление постов: яма -> P1; первый подъемник -> P2; '
+        '   - Нормативы длительности работ сервиса:\n'
+        '     * замена ГРМ, сцепления: 180 мин (3 часа);\n'
+        '     * подвеска, стойки стабилизатора, рычаги: 90 мин (1.5 часа);\n'
+        '     * замена тормозных колодок, тормозных дисков, сход-развал: 60 мин;\n'
+        '     * замена масла, фильтров, свечей, лампочек: 30 мин;\n'
+        '     * если мастер не назвал длительность, используй эти нормы.\n'
+        '   - Сопоставление постов: яма -> P1; первый подъемник -> P2; '
         'второй подъемник -> P3; сход-развал -> P4; '
-        'мелкие работы без бокса -> NO_POST. Если не указан — оставь null.\n\n'
-        'Правила для намерения RESCHEDULE:\n'
-        '- Извлеки target_car_for_action (марка переносимой машины).\n'
-        '- Извлеки reschedule_new_date, reschedule_new_time, '
-        'reschedule_new_post.\n\n'
-        'Правила для намерения COMPLETE:\n'
-        '- Извлеки target_car_for_action (марка завершаемой машины).\n'
-        '- Извлеки completion_actual_time (время завершения, если названо).'
+        'мелкие работы без бокса -> NO_POST. Если не указан — null.\n\n'
+        '5. ПРАВИЛА ДЛЯ RESCHEDULE:\n'
+        '   - Извлеки target_car_for_action (марка переносимой машины).\n'
+        '   - Извлеки reschedule_new_date, reschedule_new_time, reschedule_new_post.\n\n'
+        '6. ПРАВИЛА ДЛЯ COMPLETE:\n'
+        '   - Извлеки target_car_for_action (марка завершаемой машины).\n'
+        '   - Извлеки completion_actual_time (время завершения, если названо).'
     )
 
 
@@ -112,15 +122,16 @@ def _extract_text_from_transcription_response(response: Any) -> str:
 
 
 class AIService:
-    """Сервис интеграции с нейросетевыми моделями шлюза VseGPT.
+    """Сервис интеграции с нейросетевыми моделями шлюзов Groq и VseGPT.
 
     Attributes:
         _settings: Настройки приложения.
-        _client: Асинхронный клиент OpenAI API.
+        _client: Асинхронный клиент OpenAI API для основного шлюза VseGPT.
+        _groq_client: Асинхронный клиент для скоростной транскрибации Groq.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """Инициализирует клиент VseGPT с заданными параметрами.
+        """Инициализирует клиенты нейросетей с заданными параметрами.
 
         Args:
             settings: Экземпляр конфигурации приложения.
@@ -130,6 +141,15 @@ class AIService:
             api_key=self._settings.vsegpt_api_key.get_secret_value(),
             base_url=self._settings.vsegpt_base_url,
         )
+        self._groq_client: AsyncOpenAI | None = None
+        if (
+            self._settings.groq_api_key
+            and self._settings.groq_api_key.get_secret_value()
+        ):
+            self._groq_client = AsyncOpenAI(
+                api_key=self._settings.groq_api_key.get_secret_value(),
+                base_url=self._settings.groq_base_url,
+            )
 
     async def transcribe_audio(
         self,
@@ -138,8 +158,8 @@ class AIService:
     ) -> str:
         """Преобразует аудиозапись речи в текст на русском языке.
 
-        Использует каскадный перебор моделей с ограничением по времени,
-        чтобы исключить зависания при перегрузке сторонних провайдеров.
+        Использует приоритетный вызов Groq Cloud STT при наличии API-ключа,
+        с последующим каскадным переключением на модели VseGPT при сбоях.
 
         Args:
             audio_bytes: Бинарные данные аудиофайла.
@@ -149,8 +169,33 @@ class AIService:
             Распознанный текст на русском языке.
 
         Raises:
-            AIServiceError: Если все доступные модели не смогли ответить.
+            AIServiceError: Если все доступные сервисы не смогли ответить.
         """
+        if self._groq_client is not None:
+            audio_buffer = io.BytesIO(audio_bytes)
+            audio_buffer.name = filename
+            try:
+                raw_response = await asyncio.wait_for(
+                    self._groq_client.audio.transcriptions.create(
+                        model=self._settings.groq_stt_model,
+                        file=audio_buffer,
+                        language='ru',
+                        response_format='json',
+                    ),
+                    timeout=15.0,
+                )
+                text_result = _extract_text_from_transcription_response(
+                    raw_response,
+                )
+                if text_result:
+                    return text_result
+            except (asyncio.TimeoutError, OpenAIError, Exception) as exc:
+                logger.warning(
+                    'Сервис Groq STT вернул ошибку: %s. '
+                    'Переключение на резервный каскад VseGPT...',
+                    exc,
+                )
+
         candidate_models: list[str] = [self._settings.vsegpt_stt_model]
         for fallback_model in _FALLBACK_STT_MODELS:
             if fallback_model not in candidate_models:
@@ -188,7 +233,7 @@ class AIService:
                 )
 
         raise AIServiceError(
-            f'Не удалось распознать речь доступными моделями: {last_error}'
+            f'Не удалось распознать речь доступными сервисами: {last_error}'
         )
 
     async def extract_appointment(

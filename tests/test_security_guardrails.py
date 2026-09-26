@@ -31,6 +31,43 @@ from app.schemas.appointment import AppointmentDraft
 from app.schemas.appointment import AppointmentSource
 
 
+def _get_future_workday(
+    days_ahead: int = 2,
+    hour: int = 14,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает будущую дату рабочего дня для тестов валидации."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=days_ahead)
+    while candidate_dt.weekday() == 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _get_future_sunday(
+    hour: int = 12,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает будущую дату воскресенья для проверки инъекций."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=1)
+    while candidate_dt.weekday() != 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
 async def _run_auth_middleware_with_user(
     session_factory: async_sessionmaker[AsyncSession],
     tg_user: TelegramUser,
@@ -167,8 +204,7 @@ async def test_prompt_injection_cannot_bypass_sunday_rule(
     Args:
         booking_service: Сервис бизнес-логики управления бронированием.
     """
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    sunday_datetime = datetime.datetime(2026, 9, 20, 12, 0, tzinfo=timezone)
+    sunday_datetime = _get_future_sunday(hour=12, minute=0)
 
     malicious_draft = AppointmentDraft(
         draft_id='INJECT-SUN',
@@ -192,13 +228,12 @@ async def test_prompt_injection_cannot_bypass_sunday_rule(
             user_telegram_id=101,
         )
 
-    assert 'Воскресенье' in str(exc_info.value)
+    assert 'воскресенье' in str(exc_info.value).lower()
 
 
 def test_prompt_injection_cannot_bypass_phone_validation() -> None:
     """Проверяет невозможность создания брони без валидного телефона клиента."""
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    valid_weekday = datetime.datetime(2026, 9, 18, 14, 0, tzinfo=timezone)
+    valid_weekday = _get_future_workday(days_ahead=2, hour=14, minute=0)
 
     draft_without_phone = AppointmentDraft(
         draft_id='INJECT-NO-PHONE',

@@ -241,7 +241,7 @@ class AppointmentDraft(BaseModel):
     """Черновик записи на ремонт в оперативной памяти бота.
 
     Attributes:
-        draft_id: Уникальный идентификатор заявки.
+        draft_id: Уникальный номер черновика.
         master_telegram_id: Telegram ID ответственного мастера.
         master_name: Имя ответственного мастера.
         master_id: Внутренний первичный ключ мастера в базе данных.
@@ -259,6 +259,10 @@ class AppointmentDraft(BaseModel):
         planned_duration_minutes: Плановое время обслуживания в минутах.
         post_code: Назначенный рабочий пост.
         clarification_question: Текущий уточняющий вопрос системы.
+        is_sunday_confirmed: Подтверждена ли запись на воскресенье.
+        is_overtime_confirmed: Подтверждена ли сверхурочная работа.
+        is_master_overlap_confirmed: Подтверждено ли пересечение времени мастера.
+        master_overlap_info: Сведения о пересекающейся заявке мастера.
     """
 
     draft_id: str = Field(
@@ -329,6 +333,22 @@ class AppointmentDraft(BaseModel):
     clarification_question: str | None = Field(
         default=None,
         description='Уточняющий вопрос',
+    )
+    is_sunday_confirmed: bool = Field(
+        default=False,
+        description='Флаг подтверждения записи на воскресенье',
+    )
+    is_overtime_confirmed: bool = Field(
+        default=False,
+        description='Флаг подтверждения сверхурочной работы',
+    )
+    is_master_overlap_confirmed: bool = Field(
+        default=False,
+        description='Флаг подтверждения накладки у мастера',
+    )
+    master_overlap_info: str | None = Field(
+        default=None,
+        description='Информация о пересекающейся заявке мастера',
     )
 
     @property
@@ -414,7 +434,7 @@ class AppointmentDraft(BaseModel):
         )
         lines: list[str] = [
             '<b>Черновик записи</b>',
-            f'<b>ID:</b> {self.draft_id}',
+            f'<b>ID:</b> {self.draft_id} ({self.car_model or "Авто не указано"})',
             f'<b>Мастер:</b> {self.master_name}',
             f'<b>Пост:</b> {post_label}',
             f'<b>Время:</b> {time_label}',
@@ -430,4 +450,10 @@ class AppointmentDraft(BaseModel):
         work_text = self.work_description or ', '.join(self.work_items)
         lines.append(f'<b>Причина/работы:</b> {work_text or "Не указано"}')
         lines.append(f'<b>Плановая длительность:</b> {duration_label}')
+
+        if self.master_overlap_info and not self.is_master_overlap_confirmed:
+            lines.append(
+                f'\n⚠️ <b>Внимание:</b> {self.master_overlap_info}'
+            )
+
         return '\n'.join(lines)

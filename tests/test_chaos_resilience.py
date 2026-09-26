@@ -36,6 +36,25 @@ from app.services.calendar_service import CalendarServiceError
 from app.services.calendar_service import GoogleCalendarService
 
 
+def _get_future_workday(
+    days_ahead: int = 2,
+    hour: int = 10,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает будущую дату рабочего дня для тестов надежности."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=days_ahead)
+    while candidate_dt.weekday() == 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
 @pytest.mark.asyncio
 async def test_google_calendar_failure_rolls_back_database(
     session_factory: async_sessionmaker[AsyncSession],
@@ -58,8 +77,7 @@ async def test_google_calendar_failure_rolls_back_database(
         calendar_service=mock_calendar_service,
     )
 
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 17, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     draft = AppointmentDraft(
         draft_id='CHAOS-CAL-01',

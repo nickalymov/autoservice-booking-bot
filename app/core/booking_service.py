@@ -16,9 +16,12 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.config import POST_NAMES
 from app.config import PostCode
 from app.config import TIMEZONE_NAME
 from app.config import UserRole
+from app.config import WORK_DAY_END_HOUR
+from app.config import WORK_DAY_START_HOUR
 from app.core.permissions import can_manage_appointment
 from app.core.permissions import can_manage_users
 from app.database.models import Appointment
@@ -51,6 +54,18 @@ class PermissionDeniedError(BookingError):
 
 class EntityNotFoundError(BookingError):
     """Вызывается, если запрашиваемая сущность не найдена в базе данных."""
+
+
+class PastTimeError(BookingError):
+    """Вызывается при попытке записать автомобиль на прошедшее время."""
+
+
+class SundayNoticeError(BookingError):
+    """Вызывается при записи на воскресенье без явного подтверждения."""
+
+
+class OvertimeNoticeError(BookingError):
+    """Вызывается при выходе за пределы рабочего дня без подтверждения."""
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,25 @@ class DayScheduleOverview:
 
     target_date: datetime.date
     posts_schedule: list[PostScheduleItem]
+
+
+@dataclass(frozen=True)
+class UpcomingSlot:
+    """Ближайший доступный слот для обслуживания.
+
+    Attributes:
+        target_date: Календарная дата.
+        post_code: Код рабочего поста.
+        post_name: Наименование поста.
+        start_time: Время начала.
+        end_time: Время окончания.
+    """
+
+    target_date: datetime.date
+    post_code: PostCode
+    post_name: str
+    start_time: datetime.time
+    end_time: datetime.time
 
 
 async def _fetch_active_user_and_appointment(
@@ -151,31 +185,84 @@ class BookingService:
         self._calendar_service = calendar_service
         self._booking_lock = asyncio.Lock()
 
+    async def check_master_overlap(
+        self,
+        master_id: int,
+        start_dt: datetime.datetime,
+        end_dt: datetime.datetime,
+        exclude_appointment_id: int | None = None,
+    ) -> Appointment | None:
+        """Проверяет наличие пересечений времени у назначенного мастера.
+
+        Args:
+            master_id: Первичный ключ мастера.
+            start_dt: Начало интервала.
+            end_dt: Окончание интервала.
+            exclude_appointment_id: Исключаемый ID наряда.
+
+        Returns:
+            Пересекающийся наряд мастера или None.
+        """
+        async with get_async_session(self._session_factory) as session:
+            appt_repo = AppointmentRepository(session)
+            conflicts = await appt_repo.get_master_conflicts(
+                master_id=master_id,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                exclude_appointment_id=exclude_appointment_id,
+            )
+            return conflicts[0] if conflicts else None
+
     async def check_slot(
         self,
         post_code: PostCode | None,
         start_dt: datetime.datetime,
         end_dt: datetime.datetime,
         exclude_appointment_id: int | None = None,
+        allow_sunday: bool = False,
+        allow_overtime: bool = False,
     ) -> SlotCheckResult:
-        """Проверяет доступность слота и возвращает свободные альтернативы.
+        """Проверяет доступность слота с валидацией времени и правил сервиса.
 
         Args:
             post_code: Код выбранного поста или None.
             start_dt: Время начала интервала.
             end_dt: Время окончания интервала.
             exclude_appointment_id: ID записи для исключения при проверке.
+            allow_sunday: Разрешить ли запись на воскресенье.
+            allow_overtime: Разрешить ли сверхурочную работу.
 
         Returns:
             Результат проверки доступности со списком альтернативных постов.
 
         Raises:
-            BookingError: Если дата записи приходится на воскресенье.
+            PastTimeError: Если дата и время уже прошли.
+            SundayNoticeError: Если наряд в воскресенье и не подтвержден.
+            OvertimeNoticeError: Если наряд выходит за рамки смены.
         """
-        if start_dt.weekday() == 6:
-            raise BookingError(
-                'Воскресенье — выходной день автосервиса. Запись возможна '
-                'только с понедельника по субботу.',
+        timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+        now_dt = datetime.datetime.now(timezone)
+
+        if start_dt < now_dt:
+            raise PastTimeError(
+                f'Указанное время ({start_dt.strftime("%d.%m.%Y %H:%M")}) '
+                f'уже прошло. Текущее время: {now_dt.strftime("%H:%M")}.'
+            )
+
+        if start_dt.weekday() == 6 and not allow_sunday:
+            raise SundayNoticeError(
+                'Запрошенная дата приходится на воскресенье (выходной день).'
+            )
+
+        work_end_dt = datetime.datetime.combine(
+            start_dt.date(),
+            datetime.time(WORK_DAY_END_HOUR, 0),
+            tzinfo=timezone,
+        )
+        if end_dt > work_end_dt and not allow_overtime:
+            raise OvertimeNoticeError(
+                f'Запись до {end_dt.strftime("%H:%M")} выходит за пределы '
+                f'рабочего дня автосервиса ({WORK_DAY_END_HOUR}:00).'
             )
 
         async with get_async_session(self._session_factory) as session:
@@ -229,6 +316,93 @@ class BookingService:
                 available_posts=available_posts,
             )
 
+    async def get_nearest_free_slots(
+        self,
+        duration_minutes: int = 60,
+        days_ahead: int = 5,
+        target_post_code: PostCode | None = None,
+    ) -> list[UpcomingSlot]:
+        """Ищет ближайшие доступные временные окна начиная со строго будущего времени.
+
+        Args:
+            duration_minutes: Требуемая непрерывная длительность слота.
+            days_ahead: Горизонт поиска в календарных днях.
+            target_post_code: Опциональный конкретный пост для поиска.
+
+        Returns:
+            Список найденных окон в будущем времени.
+        """
+        timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+        now_dt = datetime.datetime.now(timezone)
+        free_slots: list[UpcomingSlot] = []
+
+        async with get_async_session(self._session_factory) as session:
+            post_repo = PostRepository(session)
+            appt_repo = AppointmentRepository(session)
+
+            posts = list(await post_repo.get_all_active())
+            if target_post_code:
+                posts = [p for p in posts if p.code == target_post_code]
+            else:
+                posts = [p for p in posts if p.code != PostCode.NO_POST]
+
+            for day_offset in range(days_ahead):
+                current_day = (now_dt + datetime.timedelta(days=day_offset)).date()
+                if current_day.weekday() == 6:
+                    continue
+
+                day_start_dt = datetime.datetime.combine(
+                    current_day,
+                    datetime.time(WORK_DAY_START_HOUR, 0),
+                    tzinfo=timezone,
+                )
+                day_end_dt = datetime.datetime.combine(
+                    current_day,
+                    datetime.time(WORK_DAY_END_HOUR, 0),
+                    tzinfo=timezone,
+                )
+
+                search_start = max(now_dt, day_start_dt)
+                if search_start >= day_end_dt:
+                    continue
+
+                if search_start.minute % 30 != 0:
+                    added_minutes = 30 - (search_start.minute % 30)
+                    search_start = (
+                        search_start
+                        + datetime.timedelta(minutes=added_minutes)
+                    ).replace(second=0, microsecond=0)
+
+                for post in posts:
+                    slot_ptr = search_start
+                    while (
+                        slot_ptr + datetime.timedelta(minutes=duration_minutes)
+                        <= day_end_dt
+                    ):
+                        slot_end = slot_ptr + datetime.timedelta(
+                            minutes=duration_minutes,
+                        )
+                        conflicts = await appt_repo.get_conflicts(
+                            post_id=post.id,
+                            start_dt=slot_ptr,
+                            end_dt=slot_end,
+                        )
+                        if not conflicts:
+                            free_slots.append(
+                                UpcomingSlot(
+                                    target_date=current_day,
+                                    post_code=post.code,
+                                    post_name=POST_NAMES.get(post.code, post.name),
+                                    start_time=slot_ptr.time(),
+                                    end_time=slot_end.time(),
+                                )
+                            )
+                            if len(free_slots) >= 10:
+                                return free_slots
+                        slot_ptr += datetime.timedelta(minutes=30)
+
+        return free_slots
+
     async def confirm_and_create(
         self,
         draft: AppointmentDraft,
@@ -255,11 +429,6 @@ class BookingService:
         ):
             raise BookingError(
                 'Не заполнены все обязательные поля для подтверждения.',
-            )
-
-        if draft.start_datetime.weekday() == 6:
-            raise BookingError(
-                'Воскресенье — выходной день автосервиса.',
             )
 
         async with self._booking_lock:
@@ -297,14 +466,26 @@ class BookingService:
                             post_code=draft.post_code,
                             start_dt=draft.start_datetime,
                             end_dt=draft.end_datetime,
+                            allow_sunday=draft.is_sunday_confirmed,
+                            allow_overtime=draft.is_overtime_confirmed,
                         )
                         if not slot_check.is_available:
                             raise SlotConflictError(
                                 'Выбранный пост занят в указанное время.',
                             )
+                else:
+                    await self.check_slot(
+                        post_code=PostCode.NO_POST,
+                        start_dt=draft.start_datetime,
+                        end_dt=draft.end_datetime,
+                        allow_sunday=draft.is_sunday_confirmed,
+                        allow_overtime=draft.is_overtime_confirmed,
+                    )
 
                 public_id = await appt_repo.generate_unique_public_id(
-                    draft.start_datetime.date(),
+                    post_code=draft.post_code,
+                    start_datetime=draft.start_datetime,
+                    master_id=target_master_id,
                 )
                 appointment = await appt_repo.create_from_draft(
                     draft=draft,
@@ -363,6 +544,8 @@ class BookingService:
         new_start_dt: datetime.datetime,
         new_post_code: PostCode | None,
         user_telegram_id: int,
+        allow_sunday: bool = False,
+        allow_overtime: bool = False,
     ) -> Appointment:
         """Переносит существующую запись на новое время или пост.
 
@@ -371,6 +554,8 @@ class BookingService:
             new_start_dt: Новые дата и время начала ремонта.
             new_post_code: Новый рабочий пост или None.
             user_telegram_id: Telegram ID сотрудника.
+            allow_sunday: Разрешить перенос на воскресенье.
+            allow_overtime: Разрешить перенос на сверхурочное время.
 
         Returns:
             Обновленная запись на ремонт.
@@ -380,9 +565,6 @@ class BookingService:
             SlotConflictError: При занятости целевого слота.
             BookingError: При ошибке валидации данных.
         """
-        if new_start_dt.weekday() == 6:
-            raise BookingError('Воскресенье — выходной день автосервиса.')
-
         async with self._booking_lock:
             async with get_async_session(self._session_factory) as session:
                 user, appointment = await _fetch_active_user_and_appointment(
@@ -412,6 +594,8 @@ class BookingService:
                     start_dt=new_start_dt,
                     end_dt=new_end_dt,
                     exclude_appointment_id=appointment.id,
+                    allow_sunday=allow_sunday,
+                    allow_overtime=allow_overtime,
                 )
                 if not slot_check.is_available:
                     raise SlotConflictError(
@@ -578,6 +762,36 @@ class BookingService:
             return DayScheduleOverview(
                 target_date=target_date,
                 posts_schedule=posts_schedule,
+            )
+
+    async def get_closed_appointments(
+        self,
+        user_telegram_id: int,
+        limit: int = 15,
+    ) -> list[Appointment]:
+        """Возвращает закрытые заявки с учетом прав доступа сотрудника.
+
+        Args:
+            user_telegram_id: Telegram ID сотрудника.
+            limit: Количество заявок.
+
+        Returns:
+            Список закрытых нарядов сервиса.
+        """
+        async with get_async_session(self._session_factory) as session:
+            user_repo = UserRepository(session)
+            appt_repo = AppointmentRepository(session)
+
+            user = await user_repo.get_by_telegram_id(user_telegram_id)
+            if user is None or not user.is_active:
+                raise PermissionDeniedError('Доступ запрещен.')
+
+            master_filter = None if user.role in (UserRole.OWNER, UserRole.SALES) else user.id
+            return list(
+                await appt_repo.get_closed_appointments(
+                    master_id=master_filter,
+                    limit=limit,
+                )
             )
 
     async def start_appointment(

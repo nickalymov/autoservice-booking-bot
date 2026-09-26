@@ -23,6 +23,9 @@ class BookingState(StatesGroup):
         waiting_for_master_selection: Ожидание выбора ответственного мастера.
         waiting_for_new_user_id: Ожидание ввода Telegram ID нового сотрудника.
         waiting_for_new_user_name: Ожидание ввода имени нового сотрудника.
+        waiting_for_sunday_decision: Ожидание выбора действия при записи на воскресенье.
+        waiting_for_overtime_decision: Ожидание подтверждения сверхурочной работы.
+        waiting_for_master_overlap_decision: Ожидание подтверждения накладки у мастера.
     """
 
     waiting_for_confirmation = State()
@@ -34,3 +37,6 @@ class BookingState(StatesGroup):
     waiting_for_master_selection = State()
     waiting_for_new_user_id = State()
     waiting_for_new_user_name = State()
+    waiting_for_sunday_decision = State()
+    waiting_for_overtime_decision = State()
+    waiting_for_master_overlap_decision = State()

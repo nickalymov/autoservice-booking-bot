@@ -4,15 +4,17 @@
 управление переходами статусов, передачу записей и досрочное завершение.
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 import datetime
-import random
 
 from sqlalchemy import Select
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.config import PostCode
 from app.database.models.appointment import Appointment
 from app.database.models.user import User
 from app.schemas.appointment import AppointmentDraft
@@ -22,6 +24,12 @@ _BLOCKING_STATUSES: tuple[AppointmentStatus, ...] = (
     AppointmentStatus.CONFIRMED,
     AppointmentStatus.IN_PROGRESS,
     AppointmentStatus.WAITING_TRANSFER,
+)
+
+_CLOSED_STATUSES: tuple[AppointmentStatus, ...] = (
+    AppointmentStatus.DONE,
+    AppointmentStatus.CANCELLED,
+    AppointmentStatus.NO_SHOW,
 )
 
 
@@ -56,25 +64,36 @@ class AppointmentRepository:
 
     async def generate_unique_public_id(
         self,
-        target_date: datetime.date,
+        post_code: PostCode | None,
+        start_datetime: datetime.datetime,
+        master_id: int,
     ) -> str:
-        """Генерирует уникальный публичный номер записи вида B260911001.
+        """Генерирует человекочитаемый номер записи вида P1-1909-1530-1.
 
         Args:
-            target_date: Дата планируемого обслуживания.
+            post_code: Код поста или None.
+            start_datetime: Дата и время начала обслуживания.
+            master_id: Первичный ключ назначенного мастера.
 
         Returns:
-            Уникальный строковый номер записи.
+            Человекочитаемый строковый номер записи.
         """
-        date_part = target_date.strftime('%y%m%d')
-        for _ in range(100):
-            random_part = f'{random.randint(100, 999)}'
-            candidate_id = f'B{date_part}{random_part}'
-            existing = await self.get_by_public_id(candidate_id)
-            if existing is None:
-                return candidate_id
-        timestamp = int(datetime.datetime.now().timestamp())
-        return f'B{date_part}{timestamp % 10000:04d}'
+        post_prefix = (
+            post_code.value
+            if post_code and post_code != PostCode.NO_POST
+            else 'P0'
+        )
+        date_part = start_datetime.strftime('%d%m')
+        time_part = start_datetime.strftime('%H%M')
+        base_id = f'{post_prefix}-{date_part}-{time_part}-{master_id}'
+
+        candidate_id = base_id
+        suffix = 1
+        while (await self.get_by_public_id(candidate_id)) is not None:
+            suffix += 1
+            candidate_id = f'{base_id}-{suffix}'
+
+        return candidate_id
 
     async def search_active_by_car(
         self,
@@ -114,6 +133,29 @@ class AppointmentRepository:
         result = await self._session.scalars(stmt)
         return result.all()
 
+    async def get_closed_appointments(
+        self,
+        master_id: int | None = None,
+        limit: int = 15,
+    ) -> Sequence[Appointment]:
+        """Возвращает список последних завершенных и отмененных записей.
+
+        Args:
+            master_id: Опциональный идентификатор мастера для фильтрации.
+            limit: Количество возвращаемых записей.
+
+        Returns:
+            Список закрытых нарядов, отсортированных по убыванию времени.
+        """
+        stmt = _build_detailed_appointment_query().where(
+            Appointment.status.in_(_CLOSED_STATUSES),
+        )
+        if master_id is not None:
+            stmt = stmt.where(Appointment.master_id == master_id)
+        stmt = stmt.order_by(Appointment.updated_at.desc()).limit(limit)
+        result = await self._session.scalars(stmt)
+        return result.all()
+
     async def get_conflicts(
         self,
         post_id: int,
@@ -139,9 +181,40 @@ class AppointmentRepository:
             Appointment.end_datetime > start_dt,
         )
         if exclude_appointment_id is not None:
-            stmt = stmt.where(
-                Appointment.id != exclude_appointment_id,
+            stmt = stmt.where(Appointment.id != exclude_appointment_id)
+        stmt = stmt.order_by(Appointment.start_datetime)
+        result = await self._session.scalars(stmt)
+        return result.all()
+
+    async def get_master_conflicts(
+        self,
+        master_id: int,
+        start_dt: datetime.datetime,
+        end_dt: datetime.datetime,
+        exclude_appointment_id: int | None = None,
+    ) -> Sequence[Appointment]:
+        """Выбирает записи мастера, создающие накладку в его личном времени.
+
+        Args:
+            master_id: Первичный ключ мастера.
+            start_dt: Начало интервала.
+            end_dt: Окончание интервала.
+            exclude_appointment_id: ID текущей записи для исключения.
+
+        Returns:
+            Список пересекающихся нарядов того же мастера.
+        """
+        stmt = (
+            _build_detailed_appointment_query()
+            .where(
+                Appointment.master_id == master_id,
+                Appointment.status.in_(_BLOCKING_STATUSES),
+                Appointment.start_datetime < end_dt,
+                Appointment.end_datetime > start_dt,
             )
+        )
+        if exclude_appointment_id is not None:
+            stmt = stmt.where(Appointment.id != exclude_appointment_id)
         stmt = stmt.order_by(Appointment.start_datetime)
         result = await self._session.scalars(stmt)
         return result.all()

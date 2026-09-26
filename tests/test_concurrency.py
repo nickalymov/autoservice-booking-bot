@@ -25,6 +25,25 @@ from app.schemas.appointment import AppointmentDraft
 from app.schemas.appointment import AppointmentSource
 
 
+def _get_future_workday(
+    days_ahead: int = 2,
+    hour: int = 10,
+    minute: int = 0,
+) -> datetime.datetime:
+    """Возвращает будущую дату рабочего дня для тестов параллелизма."""
+    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    now_dt = datetime.datetime.now(timezone)
+    candidate_dt = now_dt + datetime.timedelta(days=days_ahead)
+    while candidate_dt.weekday() == 6:
+        candidate_dt += datetime.timedelta(days=1)
+    return candidate_dt.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+
 @pytest.mark.asyncio
 async def test_concurrent_booking_same_post_race_condition(
     booking_service: BookingService,
@@ -36,8 +55,7 @@ async def test_concurrent_booking_same_post_race_condition(
         booking_service: Сервис бизнес-логики управления бронированием.
         session_factory: Фабрика сессий тестовой базы данных.
     """
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 16, 10, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=10, minute=0)
 
     async def attempt_booking(index: int) -> Appointment:
         draft = AppointmentDraft(
@@ -92,8 +110,7 @@ async def test_concurrent_booking_different_posts(
     Args:
         booking_service: Сервис бизнес-логики управления бронированием.
     """
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 16, 11, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=11, minute=0)
 
     draft_p1 = AppointmentDraft(
         draft_id='DIFF-P1',
@@ -146,8 +163,7 @@ async def test_concurrent_no_post_bookings(
     Args:
         booking_service: Сервис бизнес-логики управления бронированием.
     """
-    timezone = zoneinfo.ZoneInfo(TIMEZONE_NAME)
-    start_time = datetime.datetime(2026, 9, 16, 14, 0, tzinfo=timezone)
+    start_time = _get_future_workday(days_ahead=2, hour=14, minute=0)
 
     drafts = [
         AppointmentDraft(
