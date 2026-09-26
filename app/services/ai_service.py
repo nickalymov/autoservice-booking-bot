@@ -1,13 +1,14 @@
 """Модуль сервиса искусственного интеллекта автосервиса.
 
 Обеспечивает асинхронную транскрибацию голосовых сообщений
-с механизмом быстрого каскадного переключения моделей (Groq, VseGPT)
-и извлечение структурированных параметров записи через модели LLM.
+через мультимодальный Chat API VseGPT (audioinput) с каскадным
+переключением на внешние шлюзы и структурированное извлечение параметров.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import io
 import logging
@@ -15,6 +16,7 @@ from typing import Any
 from typing import cast
 import zoneinfo
 
+import httpx
 from openai import AsyncOpenAI
 from openai import OpenAIError
 from openai.types.chat import completion_create_params
@@ -122,12 +124,12 @@ def _extract_text_from_transcription_response(response: Any) -> str:
 
 
 class AIService:
-    """Сервис интеграции с нейросетевыми моделями шлюзов Groq и VseGPT.
+    """Сервис интеграции с нейросетевыми моделями VseGPT, Deepgram и Groq.
 
     Attributes:
         _settings: Настройки приложения.
         _client: Асинхронный клиент OpenAI API для основного шлюза VseGPT.
-        _groq_client: Асинхронный клиент для скоростной транскрибации Groq.
+        _groq_client: Асинхронный клиент для шлюза Groq при его доступности.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -151,6 +153,131 @@ class AIService:
                 base_url=self._settings.groq_base_url,
             )
 
+    async def _transcribe_with_vsegpt_audioinput(
+        self,
+        audio_bytes: bytes,
+    ) -> str | None:
+        """Транскрибирует речь через мультимодальный Chat API VseGPT.
+
+        Args:
+            audio_bytes: Бинарные данные аудиофайла из Telegram.
+
+        Returns:
+            Распознанный текст на русском языке или None при ошибке.
+        """
+        if not self._settings.vsegpt_use_audioinput:
+            return None
+
+        encoded_audio = base64.b64encode(audio_bytes).decode('utf-8')
+        prompt_text = (
+            'Ты — ассистент автосервиса. Твоя единственная задача — дословно '
+            'расшифровать голосовое сообщение мастера на русском языке. '
+            'Точно сохрани все марки машин, числа, телефонные номера и термины. '
+            'Выведи ТОЛЬКО распознанный текст без кавычек, вводных слов и пояснений.'
+        )
+
+        candidate_models = (
+            self._settings.vsegpt_audioinput_model,
+            'google/gemini-3.1-flash-lite',
+            'google/gemini-3.1-flash-lite-pre',
+            'google/gemini-3.5-flash',
+        )
+
+        for model_name in candidate_models:
+            try:
+                response = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model=model_name,
+                        messages=[{
+                            'role': 'user',
+                            'content': [
+                                {
+                                    'type': 'input_audio',
+                                    'input_audio': {
+                                        'data': encoded_audio,
+                                        'format': 'mp3',
+                                    },
+                                },
+                                {
+                                    'type': 'text',
+                                    'text': prompt_text,
+                                },
+                            ],
+                        }],
+                        temperature=0.0,
+                        max_tokens=400,
+                    ),
+                    timeout=20.0,
+                )
+                content = response.choices[0].message.content
+                if content and content.strip():
+                    return content.strip().strip('"').strip("'")
+            except Exception as exc:
+                logger.warning(
+                    'Модель VseGPT audioinput %s вернула ошибку: %s',
+                    model_name,
+                    exc,
+                )
+
+        return None
+
+    async def _transcribe_with_deepgram(
+        self,
+        audio_bytes: bytes,
+    ) -> str | None:
+        """Транскрибирует аудиозапись через REST API Deepgram.
+
+        Args:
+            audio_bytes: Бинарные данные аудиофайла.
+
+        Returns:
+            Распознанный текст на русском языке или None при ошибке.
+        """
+        if (
+            not self._settings.deepgram_api_key
+            or not self._settings.deepgram_api_key.get_secret_value()
+        ):
+            return None
+
+        url = (
+            f'{self._settings.deepgram_base_url}?'
+            f'model={self._settings.deepgram_model}&'
+            'language=ru&'
+            'smart_format=true'
+        )
+        headers = {
+            'Authorization': (
+                f'Token {self._settings.deepgram_api_key.get_secret_value()}'
+            ),
+            'Content-Type': 'audio/ogg',
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                response = await http_client.post(
+                    url=url,
+                    headers=headers,
+                    content=audio_bytes,
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    channels = payload.get('results', {}).get('channels', [])
+                    if channels:
+                        alts = channels[0].get('alternatives', [])
+                        if alts:
+                            transcript = alts[0].get('transcript', '')
+                            if transcript.strip():
+                                return transcript.strip()
+                logger.warning(
+                    'Deepgram вернул статус %d: %s',
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as exc:
+            logger.warning('Сбой соединения с Deepgram API: %s', exc)
+
+        return None
+
     async def transcribe_audio(
         self,
         audio_bytes: bytes,
@@ -158,8 +285,8 @@ class AIService:
     ) -> str:
         """Преобразует аудиозапись речи в текст на русском языке.
 
-        Использует приоритетный вызов Groq Cloud STT при наличии API-ключа,
-        с последующим каскадным переключением на модели VseGPT при сбоях.
+        Использует приоритетный вызов VseGPT audioinput (Gemini),
+        затем Deepgram, Groq и каскад классических моделей STT.
 
         Args:
             audio_bytes: Бинарные данные аудиофайла.
@@ -171,6 +298,16 @@ class AIService:
         Raises:
             AIServiceError: Если все доступные сервисы не смогли ответить.
         """
+        vsegpt_audio_result = await self._transcribe_with_vsegpt_audioinput(
+            audio_bytes,
+        )
+        if vsegpt_audio_result:
+            return vsegpt_audio_result
+
+        deepgram_result = await self._transcribe_with_deepgram(audio_bytes)
+        if deepgram_result:
+            return deepgram_result
+
         if self._groq_client is not None:
             audio_buffer = io.BytesIO(audio_bytes)
             audio_buffer.name = filename
@@ -189,10 +326,9 @@ class AIService:
                 )
                 if text_result:
                     return text_result
-            except (asyncio.TimeoutError, OpenAIError, Exception) as exc:
+            except Exception as exc:
                 logger.warning(
-                    'Сервис Groq STT вернул ошибку: %s. '
-                    'Переключение на резервный каскад VseGPT...',
+                    'Groq STT вернул ошибку: %s. Переключение на VseGPT...',
                     exc,
                 )
 

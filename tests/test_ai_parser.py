@@ -238,7 +238,7 @@ def test_draft_update_from_voice_edit() -> None:
 @pytest.mark.asyncio
 async def test_ai_service_extract_appointment_mocked() -> None:
     """Проверяет изолированную работу AIService.extract_appointment."""
-    mock_settings = Settings()
+    mock_settings = Settings(vsegpt_use_audioinput=False)
     service_instance = ai_service.AIService(settings=mock_settings)
 
     mock_json_content = (
@@ -277,9 +277,31 @@ async def test_ai_service_extract_appointment_mocked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_service_transcribe_mocked() -> None:
-    """Проверяет транскрибацию аудиозаписи в текст через Whisper."""
-    mock_settings = Settings()
+async def test_ai_service_transcribe_audioinput_mocked() -> None:
+    """Проверяет транскрибацию речи через VseGPT audioinput."""
+    mock_settings = Settings(vsegpt_use_audioinput=True)
+    service_instance = ai_service.AIService(settings=mock_settings)
+
+    mock_choice = MagicMock()
+    mock_choice.message.content = 'Запиши Киа Рио на 10 утра'
+    mock_response = MagicMock(choices=[mock_choice])
+
+    with patch.object(
+        service_instance.client.chat.completions,
+        'create',
+        new_callable=AsyncMock,
+        return_value=mock_response,
+    ):
+        text = await service_instance.transcribe_audio(
+            audio_bytes=b'fake_ogg_bytes',
+        )
+        assert text == 'Запиши Киа Рио на 10 утра'
+
+
+@pytest.mark.asyncio
+async def test_ai_service_transcribe_classic_mocked() -> None:
+    """Проверяет транскрибацию речи через классический эндпоинт STT."""
+    mock_settings = Settings(vsegpt_use_audioinput=False)
     service_instance = ai_service.AIService(settings=mock_settings)
 
     mock_transcription = MagicMock()

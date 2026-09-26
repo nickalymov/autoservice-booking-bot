@@ -59,8 +59,13 @@ class Settings(BaseSettings):
         vsegpt_api_key: Ключ доступа к сервису VseGPT.
         vsegpt_base_url: Базовый адрес API VseGPT.
         vsegpt_chat_model: Модель для текстового анализа и извлечения данных.
-        vsegpt_stt_model: Модель для распознавания голосовых сообщений.
-        groq_api_key: API-ключ для скоростного сервиса распознавания речи Groq.
+        vsegpt_stt_model: Модель для транскрибации речи по старому эндпоинту.
+        vsegpt_use_audioinput: Флаг распознавания речи через чат-эндпоинт VseGPT.
+        vsegpt_audioinput_model: Мультимодальная модель для распознавания речи.
+        deepgram_api_key: Резервный API-ключ Deepgram.
+        deepgram_base_url: Адрес эндпоинта Deepgram API.
+        deepgram_model: Модель распознавания речи Deepgram.
+        groq_api_key: Резервный API-ключ Groq при наличии прокси.
         groq_base_url: Базовый адрес API Groq.
         groq_stt_model: Модель Whisper на инфраструктуре Groq.
         db_host: Хост сервера базы данных PostgreSQL.
@@ -105,6 +110,27 @@ class Settings(BaseSettings):
     vsegpt_stt_model: str = Field(
         default='stt-openai/whisper-1',
         description='Идентификатор модели для транскрибации речи в VseGPT',
+    )
+    vsegpt_use_audioinput: bool = Field(
+        default=True,
+        description='Использовать мультимодальный Chat API VseGPT для распознавания',
+    )
+    vsegpt_audioinput_model: str = Field(
+        default='google/gemini-3.1-flash-lite',
+        description='Мультимодальная модель для распознавания речи в VseGPT',
+    )
+
+    deepgram_api_key: SecretStr | None = Field(
+        default=None,
+        description='API-ключ для распознавания речи через Deepgram',
+    )
+    deepgram_base_url: str = Field(
+        default='https://api.deepgram.com/v1/listen',
+        description='Базовый URL эндпоинта Deepgram STT API',
+    )
+    deepgram_model: str = Field(
+        default='nova-2',
+        description='Модель распознавания речи Deepgram',
     )
 
     groq_api_key: SecretStr | None = Field(
