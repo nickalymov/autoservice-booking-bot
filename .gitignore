@@ -8,13 +8,6 @@ client_secret*.json
 *.pem
 *.key
 
-# Конфиденциальные рабочие файлы и дампы диалогов
-Переписка.txt
-repository_export.md
-export_repo.py
-amvera_docs.txt
-vsegpt_docs.md
-
 # Локальные базы данных и папки данных
 *.db
 *.sqlite
